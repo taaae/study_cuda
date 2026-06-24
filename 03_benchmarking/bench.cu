@@ -17,6 +17,10 @@ __global__ void copy_kernel(const float* in, float* out, int n) {
 // On return, `out` must equal `in` (a correct copy happened last).
 // Do NOT use the library time_kernel here — write the event code yourself.
 float benchmark_copy(const float* in, float* out, int n, int iters) {
+
+    // Get SM num, select dims
+    cudaDeviceProp prop;
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     int sms = prop.multiProcessorCount;
     dim3 block(256);
     dim3 grid(sms * 32);
@@ -27,10 +31,6 @@ float benchmark_copy(const float* in, float* out, int n, int iters) {
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-
-    // Get SM num, select dims
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     
     // TODO: one warmup launch (and a sync) — its time is discarded.
     copy_kernel<<<grid, block>>>(in, out, n);
