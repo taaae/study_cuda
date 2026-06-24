@@ -5,8 +5,9 @@
 // One thread computes one output element: c[i] = a[i] + b[i].
 __global__ void vadd(const float* a, const float* b, float* c, int n) {
     // TODO: compute this thread's global index, guard against n, write c[i].
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < n) {
-        c[i] = a[i] + b[i]
+        c[i] = a[i] + b[i];
     }
 }
 
@@ -14,5 +15,5 @@ __global__ void vadd(const float* a, const float* b, float* c, int n) {
 // Pick a block size, compute the grid size, and launch vadd.
 void solve(const float* a, const float* b, float* c, int n) {
     // TODO: launch vadd<<<grid, block>>>(a, b, c, n);
-    
+    vadd<<<ceil_div(n, 256), 256>>>(a, b, c, n);
 }
