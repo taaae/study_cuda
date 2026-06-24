@@ -73,3 +73,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Course grading build artifacts
+_grade_bin
+__pycache__/
+*.pyc
+.DS_Store
