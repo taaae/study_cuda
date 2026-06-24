@@ -11,7 +11,7 @@ __global__ void transpose(const float* in, float* out, int n) {
     // TODO: row = the other dimension index (uses threadIdx.y)
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     if (row < n && col < n) {
-        out[row * n + col] = in[col * n + row];
+        out[col * n + row] = in[row * n + col];
     }
 }
 
