@@ -25,7 +25,7 @@ void solve(float a, const float* x, float* y, int n) {
     // TODO: pick a block size and a grid of a few blocks per SM (independent of n).
     int sms = p.multiProcessorCount;
     dim3 block(256);
-    dim3 grid(sms * 4);
+    dim3 grid(sms * 32);
     // TODO: launch saxpy<<<grid, block>>>(a, x, y, n);
     saxpy<<<grid, block>>>(a, x, y, n);
 }
