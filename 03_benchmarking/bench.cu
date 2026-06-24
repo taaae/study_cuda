@@ -30,7 +30,7 @@ float benchmark_copy(const float* in, float* out, int n, int iters) {
 
     // Get SM num, select dims
     cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop));
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     
     // TODO: one warmup launch (and a sync) — its time is discarded.
     copy_kernel<<<grid, block>>>(in, out, n);
