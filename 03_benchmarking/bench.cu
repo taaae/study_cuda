@@ -40,9 +40,9 @@ float benchmark_copy(const float* in, float* out, int n, int iters) {
     for (int i = 0; i < iters; ++i) {
         // TODO: record 'start', launch copy_kernel, record 'stop'.
         cudaEventRecord(start);
-        CUDA_CHECK(cudaEventSynchronize(start));
+        // CUDA_CHECK(cudaEventSynchronize(start));
         copy_kernel<<<grid, block>>>(in, out, n);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        // CUDA_CHECK(cudaDeviceSynchronize());
         cudaEventRecord(stop);
         CUDA_CHECK(cudaEventSynchronize(stop));
         // TODO: synchronize on 'stop', then cudaEventElapsedTime into a float ms.
