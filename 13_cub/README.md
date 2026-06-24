@@ -1,68 +1,103 @@
-# Exercise 13 — CUB (the SOTA performance-primitive library)
+# Exercise 13 — CUB, NVIDIA's tuned primitive library
+> You wrote a scan by hand in exercise 10. Now watch a library do it in three lines — and faster.
 
-**New concepts:** CUB as NVIDIA's tuned, per-architecture primitive library; the **two-call temp-storage idiom**; `cub::DeviceScan::ExclusiveSum`. We re-solve exercise 10's scan to feel the difference between a hand-rolled kernel and a library that has been auto-tuned for every GPU.
+## The idea
+Back in exercise 10 you built an exclusive prefix sum from scratch: tiles, padding, a
+multi-pass reduce-then-scan. It worked, and you learned a ton. But you also hand-picked a
+tile size, and that choice is only *good* for one GPU. Run the same code on a different
+architecture and you'd want to re-tune.
 
-## CUB vs Thrust vs your own kernel
+CUB is the answer to "I never want to do that again." It's NVIDIA's library of
+**device-wide primitives** — `DeviceScan`, `DeviceReduce`, `DeviceRadixSort`,
+`DeviceSelect` — that have been auto-tuned for *every* compute capability. When you compile
+for `sm_75` (the T4), CUB picks tile sizes and algorithms measured to be fast on exactly
+that chip. The result routinely beats a careful hand-rolled kernel.
 
-- **Your kernel (ex 10):** maximum control, but you hand-tune tile sizes, padding, and the multi-pass plumbing — and re-tune per architecture.
-- **Thrust (ex 12):** one-liners, host-side, great productivity. Thrust's device backend *is* CUB under the hood.
-- **CUB:** the layer beneath Thrust. It exposes **device-wide** primitives (`DeviceScan`, `DeviceReduce`, `DeviceRadixSort`, `DeviceSelect`) *and* **block/warp** building blocks (`BlockScan`, `BlockReduce`, `WarpReduce`) you can drop inside your own kernels. CUB picks tile sizes and algorithms tuned for the *exact* compute capability at compile time, so it routinely beats a hand-rolled scan.
+Here we re-solve exercise 10's scan with `cub::DeviceScan::ExclusiveSum` so you can diff the
+two solutions side by side — and compare their `bw_frac` numbers. That gap is the whole lesson.
 
-## The task
+> **CUB vs Thrust:** Thrust (ex 12) is the friendly host-side layer of one-liners. Its device
+> backend *is* CUB. CUB sits one level down: device-wide calls like the one here, plus
+> **block/warp** collectives (`BlockScan`, `WarpReduce`) you can drop *inside* your own kernels.
 
-Compute the **exclusive** prefix sum of a large `int` array using `cub::DeviceScan::ExclusiveSum` — the same problem as exercise 10, now in a handful of lines.
+## Under the hood
+A device-wide scan is genuinely hard to make fast. The classic textbook approach needs
+multiple passes over memory; the bandwidth bound says the *minimum* is to read the input once
+and write the output once (`2*bytes`). CUB uses a **single-pass "decoupled look-back" scan**:
+blocks compute their local sums, publish them, and look back at predecessors' published
+aggregates instead of waiting for a separate global pass. That collapses the algorithm to
+roughly memory-bandwidth-bound — which is why the efficiency bar here (`bw_frac >= 0.55`) is
+nearly double the hand-rolled bar from exercise 10 (`0.30`).
 
-### `solve` signature (the contract)
+The one quirk of using CUB device functions: **they never allocate memory for you.** You hand
+them a scratch buffer. To find out how big it needs to be, you call the function *twice* — the
+**two-call temp-storage idiom** below. Every `cub::Device*` algorithm works this exact way.
 
+## A picture
+```text
+two-call temp-storage idiom
+
+  call #1  (d_temp == nullptr)        call #2  (d_temp valid)
+  ┌──────────────────────────┐        ┌──────────────────────────┐
+  │ CUB writes required size  │  ───►  │ CUB actually runs the     │
+  │ into temp_bytes.          │        │ scan using your scratch.  │
+  │ NOTHING is computed yet.  │        │                           │
+  └──────────────────────────┘        └──────────────────────────┘
+        │                                      ▲
+        └── cudaMalloc(&d_temp, temp_bytes) ───┘
+```
+
+## Your task
+Compute the **exclusive** prefix sum of a large `int` array (16M elements) using
+`cub::DeviceScan::ExclusiveSum`. The `solve` body is the two-call idiom; fill in the TODOs in
+`scan_cub.cu`. `#include <cub/cub.h>` is already there.
+
+### The `solve` contract
 ```cpp
 void solve(const int* in, int* out, int n);
 ```
+`in` and `out` are **device pointers** of length `n` — identical to exercise 10, so you can
+diff the two.
 
-Same as exercise 10 (`in`, `out` are device pointers of length `n`) so you can diff the two solutions and the two `bw_frac` numbers.
+## Functions & syntax you'll need
 
-## The temp-storage idiom (the one thing to memorize)
+| Function | What it does |
+| --- | --- |
+| `cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_in, d_out, n)` | Exclusive prefix sum. Call once with `d_temp==nullptr` to size, once with real scratch to run. |
+| `cudaMalloc(&d_temp, temp_bytes)` | Allocate the scratch CUB asked for, as a `void*`. |
+| `cudaFree(d_temp)` | Release the scratch before returning. |
+| `#include <cub/cub.h>` | Pulls in all of CUB's device-wide primitives. |
 
-CUB device functions don't allocate; **you** give them scratch. Every `cub::Device*` call is made **twice**:
-
+The two-call idiom, in full:
 ```cpp
 void*  d_temp = nullptr;
 size_t temp_bytes = 0;
 
-// 1) query: d_temp == nullptr → CUB only writes the required size into temp_bytes
-cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, in, out, n);
-
-// 2) allocate and call for real
-CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
-cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, in, out, n);
-
+cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, in, out, n);   // 1) size
+CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));                     //    allocate
+cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, in, out, n);   // 2) run
 CUDA_CHECK(cudaFree(d_temp));
 ```
 
-First call with `d_temp == nullptr` is the *sizing* pass: nothing runs, CUB just fills `temp_bytes`. Then you `cudaMalloc` that many bytes and call again to do the work. This pattern is identical for every `cub::Device*` algorithm.
+> **For later:** the same library exposes block/warp collectives. Inside a kernel,
+> ```cpp
+> using BlockScan = cub::BlockScan<int, 128>;
+> __shared__ typename BlockScan::TempStorage tmp;
+> BlockScan(tmp).ExclusiveSum(thread_in, thread_out);  // a whole block scans in 1 call
+> ```
+> `BlockReduce`, `WarpReduce`, and `WarpScan` follow the same shape. Not needed here.
 
-## Block/warp primitives (brief — for later)
-
-Inside a kernel you can compose CUB's collectives instead of writing your own:
-
-```cpp
-using BlockScan = cub::BlockScan<int, 128>;
-__shared__ typename BlockScan::TempStorage tmp;
-BlockScan(tmp).ExclusiveSum(thread_in, thread_out);   // a whole block scans in 1 call
-```
-
-`BlockReduce`, `WarpReduce`, and `WarpScan` work the same way. You won't need them here, but they are how you'd build a custom kernel that still uses CUB's tuned internals.
-
-## Syntax / reference
-
-```cpp
-#include <cub/cub.h>
-cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_in, d_out, num_items);
-```
-
-## Grading (`!python grade.py`)
-
-- **correctness** — output matches a CPU exclusive scan exactly.
-- **efficiency** — `bw_frac >= 0.55`. CUB is single-pass-class fast, so the bar is much higher than the hand-rolled scan in exercise 10 (`0.30`). Compare the two numbers — that gap is the lesson.
+## How it's graded
+Run `python grade.py` (or `!python grade.py` in Colab). It checks:
+- **correctness** — your output matches a CPU exclusive scan exactly.
+- **efficiency** — `bw_frac >= 0.55`. Because CUB's scan is single-pass-class, the bar is much
+  higher than exercise 10's `0.30`. Look at both numbers — the difference is the point.
 - **source** — you must call `cub::DeviceScan`.
 
-Run `python grade.py --check-solution` to grade the reference solution instead of yours.
+`python grade.py --check-solution` grades the reference solution in `solutions/` instead of yours.
+
+## Going deeper
+Try swapping in `cub::DeviceReduce::Sum` or `cub::DeviceRadixSort::SortKeys` — the temp-storage
+idiom is identical, so once you know it you know all of CUB's device layer. If you ever profile
+a scan and see it land near `bw_frac` 1.0, that's decoupled look-back doing its job: there is
+simply no faster way to move the bytes.

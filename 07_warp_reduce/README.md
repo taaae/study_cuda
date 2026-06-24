@@ -1,32 +1,17 @@
 # Exercise 07 — Warp-Level Reduction
+> Threads in a warp can hand each other registers directly — no memory, no barrier.
 
-**New concepts:** warp-level primitives — `__shfl_down_sync` — which let the 32 threads (lanes) of a warp exchange registers directly, with **no shared memory and no `__syncthreads()`**. You reduce within each warp by shuffling, then combine the per-warp results.
+## The idea
 
-## The task
+In exercise 06 the reduction tree wrote to shared memory and called `__syncthreads()` at *every* level. But here's a secret: the bottom 5 levels of that tree (where 32 or fewer values remain) all happen *within a single warp* — and a warp already runs in lockstep. Paying for shared-memory writes and full block barriers to coordinate 32 threads that are *already synchronized* is wasteful.
 
-Sum a large `float` array again, but the **intra-warp** reduction must use `__shfl_down_sync`. Then combine the (up to 32) per-warp partials within each block and contribute the block total to `*out`.
+Warp **shuffle** instructions let one lane read a register straight out of another lane in the same warp. No shared memory. No `__syncthreads()`. The values never leave the register file. So you reduce each warp to a single number using shuffles, and only then do you need a tiny bit of shared memory — one slot per warp — to combine the (at most 32) warp results.
 
-Edit `reduce.cu` and fill in the `TODO`s:
+## Under the hood
 
-1. `__device__ float warpReduceSum(float v)` — reduce one value per lane down to lane 0 using `__shfl_down_sync`.
-2. The `__global__` kernel `reduce` — grid-stride load into a register, warp-reduce, combine warps, one `atomicAdd` per block.
-3. The host function `solve` — choose the launch configuration and launch.
+A **warp** is 32 threads that issue the same instruction together. Each has a **lane id** `0..31` (`threadIdx.x % 32`). Because all 32 lanes share the execution pipeline, the hardware can expose a register from one lane to another in a single instruction — that's what shuffle is. It reads from the register file, which is the fastest memory on the chip, faster even than shared memory.
 
-You do **not** write `main()` or manage memory — `harness.cu` does, **zeroes `*out`**, and calls your `solve(...)`.
-
-### `solve` signature (the contract)
-
-```cpp
-void solve(const float* in, float* out, int n);
-```
-
-`in` is a **device pointer** of length `n`. `out` is a **device pointer to a single `float`**, already zeroed; after `solve` it must hold the total sum.
-
-## What is a warp, and what does shuffle do?
-
-A **warp** is 32 threads that execute in lockstep. Each thread has its own *lane id* `0..31` (`threadIdx.x % 32`). Shuffle instructions let a lane read a register **directly from another lane in the same warp** — no memory round-trip, no barrier.
-
-`__shfl_down_sync(mask, value, delta)` returns the `value` held by the lane `lane_id + delta` (lanes that would read past 31 return their own unchanged value). So a butterfly of halving deltas folds 32 values into lane 0:
+`__shfl_down_sync(mask, value, delta)` returns the `value` held by lane `lane_id + delta`. Lanes that would read past lane 31 keep their own value. So a sequence of halving deltas folds 32 lanes down to lane 0:
 
 ```cpp
 __device__ float warpReduceSum(float v) {
@@ -36,38 +21,78 @@ __device__ float warpReduceSum(float v) {
 }
 ```
 
-### The mask
+### The mask, and why it matters
 
-The first argument is a **32-bit lane mask** naming which lanes participate. `0xffffffff` means "all 32 lanes of this warp are active and synchronized here." Every lane named in the mask **must** execute the shuffle (it is a convergence point); if some lanes have exited via a divergent branch, the result is undefined. Here all lanes participate, so the full mask is correct — and because each thread loaded a real value (or 0 via the grid-stride loop), there is no divergence at the shuffle.
+The first argument is a **32-bit lane mask** naming which lanes participate. `0xffffffff` means "all 32 lanes, active and converged here." A shuffle is a convergence point: **every lane named in the mask must execute it**, or the result is undefined. If some lanes had bailed out via a divergent branch and you still named them, you'd get garbage. Here every lane loaded a real value (or a clean `0` from the grid-stride loop), so all 32 are live and the full mask is correct.
 
-### Why shuffle beats shared memory
+## A picture
 
-The exercise-06 tree writes and reads `__shared__` memory at every step and calls `__syncthreads()` between steps. Shuffle keeps the values **in registers** and uses the warp's implicit lockstep instead of a block barrier: no shared-memory traffic and no `__syncthreads()` for the intra-warp part. You still need a tiny bit of shared memory (one slot per warp) to combine the up-to-32 warp results — reduce those with a second shuffle on the first warp.
+```text
+__shfl_down_sync folding 8 lanes (real op uses 32, offsets 16→1):
 
-## Syntax / reference
-
-```cpp
-v += __shfl_down_sync(0xffffffff, v, offset);   // full-warp shuffle-down
+ lane:    0     1     2     3     4     5     6     7
+ v:      [a]   [b]   [c]   [d]   [e]   [f]   [g]   [h]
+          ↓←────────────────────┘ (offset 4: lane 0 += lane 4, etc.)
+ v:      a+e   b+f   c+g   d+h    .     .     .     .
+          ↓←──────────┘             (offset 2)
+ v:    a+e+c+g  ...     .     .
+          ↓←────┘                   (offset 1)
+ v:      SUM   <- lane 0 holds the whole warp's sum; no shared mem, no barrier
 ```
 
-Lane and warp ids inside a block:
+Two-stage block reduction:
 
-```cpp
-int lane = threadIdx.x & 31;        // 0..31
-int warp = threadIdx.x >> 5;        // which warp in the block
+```text
+  warp 0 ─shuffle→ partial ─┐
+  warp 1 ─shuffle→ partial ─┤  write to warpSums[warp]  ─┐
+  warp 2 ─shuffle→ partial ─┤  (one shared slot per warp) │ __syncthreads
+  ...                       ─┘                            │
+                          warp 0 loads warpSums[], shuffle-reduces ─→ block total
 ```
 
-A small shared array to hold one partial per warp (≤ 32 warps in a ≤1024-thread block):
+## Your task
+
+Sum a `float` array (`n = 2^24`) again — but the **intra-warp** reduction must use `__shfl_down_sync`. Reduce each warp to lane 0, stash the per-warp partials in a small shared array, then warp-reduce *those* with the first warp, and `atomicAdd` the block total once.
+
+### The `solve` contract
 
 ```cpp
-__shared__ float warpSums[32];
+void solve(const float* in, float* out, int n);
 ```
 
-## Grading (`!python grade.py`)
+`in` is a **device pointer** of length `n`. `out` is a **device pointer to a single `float`**, already zeroed by the harness. After `solve`, `*out` holds the total. In `reduce.cu` you fill in three things: `__device__ float warpReduceSum(float v)`, the `__global__ reduce` kernel, and the host `solve`. `harness.cu` owns `main()` and memory.
 
-- **correctness** — your sum matches a `double` CPU sum within a relative tolerance.
-- **speedup** — the harness also runs an exercise-06-style **shared-only** reduction as a baseline and reports `speedup`. On a T4 this is often modest (~1.0–1.3×); shuffle's win is bigger on compute-bound reductions, and this one is memory-bound. There is no hard speedup threshold here.
-- **efficiency** — `bw_frac >= 0.50` of peak global-memory bandwidth.
-- **source** — you must use `__shfl_down_sync`.
+## Functions & syntax you'll need
 
-Run `python grade.py --check-solution` to grade the reference solution instead of yours.
+| Thing | Form | What it does |
+|---|---|---|
+| `__shfl_down_sync` | `T __shfl_down_sync(unsigned mask, T v, int delta);` | lane reads `v` from lane `lane+delta` in the same warp |
+| lane id | `int lane = threadIdx.x & 31;` | `0..31` within the warp |
+| warp id | `int warp = threadIdx.x >> 5;` | which warp within the block |
+| `__device__` | `__device__ float warpReduceSum(...)` | a function callable from the GPU (the warp-reduce helper) |
+| `__shared__` | `__shared__ float warpSums[32];` | one slot per warp (≤32 warps in a ≤1024-thread block) |
+| `__syncthreads()` | barrier | needed once, between writing and reading `warpSums` |
+| `atomicAdd(addr, val)` | `float atomicAdd(float*, float);` | one per block, into the global total |
+| launch | `reduce<<<grid, BLOCK>>>(in, out, n);` | start the kernel |
+| `ceil_div(a, b)` | from `cuda_utils.cuh` | grid sizing |
+
+When the first warp combines the partials, lanes beyond the live warp count must load `0`: `float v = (lane < numWarps) ? warpSums[lane] : 0.f;` — otherwise you'd sum stale shared memory.
+
+> **Fun fact:** the `_sync` suffix is post-Volta (CUDA 9+). Older code used `__shfl_down` with no mask and relied on implicit warp-lockstep. Volta introduced *independent thread scheduling*, so lanes can diverge more freely — which is exactly why you must now name the participating lanes explicitly. Forgetting the mask is one of the most common warp-primitive bugs.
+
+## How it's graded
+
+`python grade.py` builds, runs, and checks:
+
+- **correctness** — sum matches a `double` CPU sum within `rel_err < 1e-3`.
+- **efficiency** — `bw_frac >= 0.50` of peak bandwidth. This is the hard bar.
+- **speedup** — the harness also runs the exercise-06 shared-only reduction and reports `speedup = base_ms / your_ms`. On a T4 expect something **modest (~1.0–1.3×)**: this reduction is memory-bound, so the read traffic dominates and shuffle's real win (cutting compute/sync overhead) is small here. **There is no speedup threshold** — don't chase it.
+- **source** — must use `__shfl_down_sync`.
+
+Run `python grade.py --check-solution` to grade the reference solution.
+
+## Going deeper
+
+1. Shuffle shines on **compute-bound** reductions and on fusing reductions into bigger kernels (softmax, layernorm, batchnorm) where avoiding shared memory frees it for other data. Memory-bound here, but the technique is everywhere in real kernels.
+2. The cooperative-groups API (`cg::reduce`) wraps this pattern in a portable, readable form — once you've hand-written it, that abstraction will make sense.
+3. There are also `__shfl_sync`, `__shfl_up_sync`, and `__shfl_xor_sync` (a true butterfly) — the XOR variant gives *every* lane the full sum, handy when all lanes need the result.

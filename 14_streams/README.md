@@ -1,68 +1,100 @@
-# Exercise 14 — Streams & Copy/Compute Overlap
+# Exercise 14 — Streams & copy/compute overlap
+> Your GPU has separate engines for copying and computing. Stop making them take turns.
 
-**New concepts:** CUDA **streams**, **pinned (page-locked) host memory**, `cudaMemcpyAsync`, and overlapping host↔device transfers with kernel execution — the classic *copy / compute / copy* pipeline.
+## The idea
+Every GPU job so far has had the same shape: copy data up (H2D), run a kernel, copy results
+back (D2H). The naive way does these strictly in sequence — one big `cudaMemcpy` in, one kernel
+over the whole array, one big `cudaMemcpy` out. The problem: while the H2D copy runs, the SMs
+sit idle; while the kernel runs, both copy engines sit idle. You're paying for hardware that's
+asleep most of the time.
 
-## The task
+A T4 actually has **three independent units** that can work at once: a copy engine for
+host→device, a copy engine for device→host, and the compute SMs. The trick to using all three
+is the **stream**. A stream is an ordered queue of GPU operations. Work *within* one stream runs
+in order; work in *different* streams can run concurrently when the resources are free.
 
-Apply an element-wise map to a large array that lives in **pinned host memory**:
+So you split the array into **chunks** and round-robin them across streams. Once the pipeline
+fills up, the hardware copies chunk `i+1` up, computes chunk `i`, and copies chunk `i-1` down —
+all at the same time. Wall-clock time drops from `copy + compute + copy` toward
+`max(copyTime, computeTime)`.
 
+## Under the hood
+Why does this need **pinned (page-locked) host memory**? Normal host allocations are *pageable* —
+the OS can move or swap them out at any moment. A DMA engine reading such memory in the
+background could find it relocated mid-transfer, so the driver refuses: `cudaMemcpyAsync` on
+pageable memory **silently degrades to a synchronous copy**, and you get zero overlap.
+
+`cudaMallocHost` pins the buffer to a fixed physical address. Now the DMA engine can stream it
+in the background while the CPU and SMs do other things — true asynchronous transfer. The
+harness already allocated `h_in` / `h_out` with `cudaMallocHost`, so you're set; just know that
+**async copies only overlap when the host buffer is pinned.**
+
+One more thing the chunking buys you: pinned transfers also hit higher peak PCIe bandwidth than
+pageable ones, because the driver doesn't have to stage through an internal pinned bounce buffer.
+
+## A picture
+```text
+streams round-robined over 3 chunks (steady state = all engines busy):
+
+stream 0:  H2D c0 │ comp c0 │ D2H c0
+stream 1:         │ H2D c1  │ comp c1 │ D2H c1
+stream 2:                   │ H2D c2  │ comp c2 │ D2H c2
+time  ─────────────────────────────────────────────────▶
+                  ▲ here the H2D engine, the SMs, and the
+                    D2H engine are ALL working at once.
 ```
-y = sqrt(x) * x + 1
-```
 
-The naive way is one big `cudaMemcpy` H2D, one kernel over the whole array, one big `cudaMemcpy` D2H. While the H2D copy runs, the GPU's compute units sit idle; while the kernel runs, both copy engines sit idle. The pipeline fixes that.
+## Your task
+Edit `streams.cu` and fill the TODOs:
+1. The `__global__` kernel `map_kernel` — element-wise `y = sqrt(x)*x + 1`, written grid-stride
+   so a chunk of any size is handled correctly.
+2. The host function `solve` — allocate device buffers, create the streams, drive the chunked
+   `H2D → kernel → D2H` pipeline on stream `i % nStreams`, then synchronize and clean up.
 
-Split the array into **chunks**. Process chunk `i` on **stream `i % nStreams`**. Because each stream is an independent queue, the hardware can run the **H2D copy of chunk `i+1`**, the **kernel on chunk `i`**, and the **D2H copy of chunk `i-1`** *at the same time* — the two copy engines (one per direction on a T4) and the SMs all stay busy.
+Use pointer offsets (`h_in + off`, `d_in + off`, …) and clamp the last chunk to `n`. Free
+everything you allocate before returning.
 
-Edit `streams.cu` and fill in the `TODO`s:
-
-1. The `__global__` kernel `map_kernel` — element-wise `y = sqrt(x)*x + 1` (grid-stride, so a chunk of any size works).
-2. The host function `solve` — allocate device buffers, create the streams, and drive the chunked async H2D → kernel → async D2H pipeline, then synchronize.
-
-### `solve` signature (the contract)
-
+### The `solve` contract
 ```cpp
 void solve(const float* h_in, float* h_out, int n, int nStreams);
 ```
+`h_in` / `h_out` are **pinned host pointers** of length `n` (allocated by the harness with
+`cudaMallocHost`). `nStreams` is how many streams to round-robin over (the harness passes 4).
+**You** own the device allocation, the chunked async copies, the kernel launches, and the
+synchronization.
 
-`h_in` and `h_out` are **pinned host pointers** (the harness allocated them with `cudaMallocHost`), length `n`. `nStreams` is how many streams to round-robin over. **You** do the device allocation, the chunked async copies, the kernel launches on streams, and the synchronization. Free everything you allocate before returning.
+## Functions & syntax you'll need
 
-## Why pinned memory is required
+| Function | What it does |
+| --- | --- |
+| `cudaStream_t s; cudaStreamCreate(&s)` | Create an ordered work queue. |
+| `cudaMemcpyAsync(dst, src, bytes, kind, s)` | Copy queued on stream `s`; returns immediately. `kind` is `cudaMemcpyHostToDevice` or `cudaMemcpyDeviceToHost`. |
+| `kernel<<<grid, block, 0, s>>>(args...)` | The **4th** launch parameter is the stream. (3rd is dynamic shared memory — 0 here.) |
+| `cudaStreamSynchronize(s)` | Block the host until everything on stream `s` is done. |
+| `cudaDeviceSynchronize()` | Block until *all* device work (every stream) is done. |
+| `cudaStreamDestroy(s)` | Destroy a stream when finished. |
+| `cudaMalloc / cudaFree` | Device buffers. Allocate them big enough for the whole array. |
+| `ceil_div(a, b)` | Helper from `cuda_utils.cuh` for grid sizing. |
 
-Normal (pageable) host memory can be moved or swapped out by the OS, so the GPU's DMA engine can't safely read it asynchronously. `cudaMemcpyAsync` on pageable memory silently degrades to a **synchronous** copy — no overlap. Page-locked memory (`cudaMallocHost` / `cudaFreeHost`) is pinned to a fixed physical address, so the DMA engine can stream it in the background while the CPU and the SMs do other work. **Async copies only overlap when the host buffer is pinned.**
-
-## The overlap model
-
-A T4 has separate **copy engines** for each direction plus the compute SMs. Operations *in the same stream* run in order; operations *in different streams* can run concurrently if the resources are free. With ≥3 chunks in flight you get a steady state:
-
-```
-stream 0:  H2D c0 | comp c0 | D2H c0
-stream 1:         | H2D c1  | comp c1 | D2H c1
-stream 2:                   | H2D c2  | comp c2 | D2H c2
-time  ───────────────────────────────────────────────▶
-```
-
-The total wall-clock time approaches `max(copyTime, computeTime)` instead of their sum.
-
-## Syntax you'll need
-
+Sketch of one chunk's launch:
 ```cpp
-cudaStream_t s;
-cudaStreamCreate(&s);                                  // make a stream
-cudaMemcpyAsync(dst, src, bytes, kind, s);            // queued on stream s
-kernel<<<grid, block, 0, s>>>(args...);               // 4th launch param = stream
-cudaStreamSynchronize(s);   // wait for one stream
-cudaDeviceSynchronize();    // wait for all work on the device
-cudaStreamDestroy(s);
+cudaMemcpyAsync(d_in + off, h_in + off, b, cudaMemcpyHostToDevice, s);
+map_kernel<<<ceil_div(len, block), block, 0, s>>>(d_in + off, d_out + off, len);
+cudaMemcpyAsync(h_out + off, d_out + off, b, cudaMemcpyDeviceToHost, s);
 ```
 
-`kind` is `cudaMemcpyHostToDevice` or `cudaMemcpyDeviceToHost`.
-Helper available: `ceil_div(a, b)` from `cuda_utils.cuh`.
-
-## Grading (`!python grade.py`)
-
+## How it's graded
+Run `python grade.py` (`!python grade.py` on Colab). It checks:
 - **correctness** — `y == sqrt(x)*x + 1` within tolerance.
-- **efficiency** — the harness times your `solve` **end to end** (copies included) and divides by a single-stream synchronous baseline it also runs. You must reach a **speedup ≥ 1.3**.
-- **source** — you must use `cudaMemcpyAsync` and create at least one stream (`cudaStreamCreate` / `cudaStream_t`).
+- **efficiency** — the harness times your `solve` **end to end** (copies included) and divides by
+  a single-stream synchronous baseline it runs itself. You need **speedup ≥ 1.3**.
+- **source** — you must use `cudaMemcpyAsync` and create at least one stream (`cudaStreamCreate` /
+  `cudaStream_t`).
 
-Run `python grade.py --check-solution` to grade the reference solution instead of yours.
+`python grade.py --check-solution` grades the reference solution instead of yours.
+
+## Going deeper
+This kernel is memory-bound, so `copyTime` and `computeTime` are comparable and overlap helps a
+lot. For a compute-heavy kernel, copies are tiny and overlap barely matters — profile before you
+pipeline. Also try `nStreams = 2` vs `8`: past ~3 in-flight chunks the speedup plateaus, because
+you only have two copy engines to saturate.

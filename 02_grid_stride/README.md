@@ -1,70 +1,95 @@
 # Exercise 02 — Grid-Stride Loops
+> Stop sizing your grid to the data. Launch a fixed pool of threads and let each one walk the array — one launch config that works for any `n`.
 
-**New concepts:** the **grid-stride loop** (decoupling the grid size from the problem size so each thread handles many elements), and the **`CUDA_CHECK`** error-checking macro.
+## The idea
 
-## The task
+In exercise 01 you launched *one thread per element*. That works, but it ties your launch configuration to the problem size: 16M elements meant ~65,000 blocks. What if `n` is a billion? What if it changes every call? You'd recompute the grid every time, and you might even exceed the maximum grid dimension.
 
-Compute **SAXPY**: `y = a*x + y` for float arrays of length `n`, where `a` is a scalar. But this time, instead of launching one thread per element, you launch a **fixed, modest grid** (sized from the device's SM count, *not* `ceil_div(n, block)`), and each thread walks the array in a **grid-stride loop**, processing several elements.
+The **grid-stride loop** flips the relationship. You launch a **fixed, modest** number of threads — sized to the *machine*, not the data — and each thread processes *many* elements by striding across the array in jumps. The jump size is the total number of threads in the grid, so the threads collectively tile the whole array with no gaps and no overlaps, no matter how big `n` is.
 
-Edit `saxpy.cu` and fill in the `TODO`s:
+We'll learn it on **SAXPY** (Scaled `A` times `X` Plus `Y`): `y = a*x + y`, where `a` is a scalar. It's the "hello world" of numerical computing — the `S` is for single-precision, and the same operation in cuBLAS is literally called `cublasSaxpy`. Computationally it's just like vector add, so we can focus entirely on the loop pattern.
 
-1. The `__global__` kernel `saxpy` — loop over the array with a grid-stride loop, computing `y[i] = a*x[i] + y[i]`.
-2. The host function `solve` — query the device, choose a fixed grid based on SM count, and launch the kernel. Wrap your CUDA runtime calls in `CUDA_CHECK(...)`.
+## Under the hood
 
-You do **not** write `main()`, allocate memory, or copy data — `harness.cu` does all of that and calls your `solve(...)`.
+Why launch fewer threads than elements? Because spawning a thread isn't free, and a thread that does *one* add then retires barely earns its keep:
 
-### `solve` signature (the contract)
+- **Setup amortization.** Each thread pays a fixed cost to start: index math, register allocation, getting scheduled onto an SM. A grid-stride thread spreads that cost over dozens of elements instead of one.
+- **Fewer block-scheduling overheads.** Millions of one-shot blocks all have to be handed out to the 40 SMs and torn down. A few thousand long-lived blocks keep the SMs continuously fed with far less churn — and avoid the "launch tail" where the last few straggler blocks run alone.
+- **Latency hiding, tuned to the machine.** Each SM can hold many resident warps at once and instantly switch to a ready warp whenever one stalls on a slow memory load. You want *enough* blocks per SM to keep that pipeline full — a few blocks per SM is plenty — but not so many that you're just paying overhead. Sizing the grid to `multiProcessorCount` gives you exactly that knob.
+
+So the recipe is: ask the device how many SMs it has, launch a small multiple of that many blocks, and let the loop handle the rest.
+
+## A picture
+
+```text
+ grid = a few blocks per SM  →  total threads = gridDim.x * blockDim.x = STRIDE
+
+ thread 0  ──▶ a[0] ───▶ a[0+S] ───▶ a[0+2S] ───▶ ...
+ thread 1  ──▶ a[1] ───▶ a[1+S] ───▶ a[1+2S] ───▶ ...
+ thread 2  ──▶ a[2] ───▶ a[2+S] ───▶ a[2+2S] ───▶ ...
+   ...
+ thread S-1 ▶ a[S-1] ─▶ a[2S-1] ─▶ ...
+
+ array:  [0 1 2 ... S-1 | S S+1 ... 2S-1 | 2S ...]
+          └─ pass 1 ──┘   └── pass 2 ──┘   └ pass 3
+```
+
+Each thread lands on `idx`, then `idx + stride`, then `idx + 2*stride`, … until it runs off the end. Notice adjacent threads still touch adjacent elements *within a pass* — that keeps memory accesses coalesced (more on that in exercise 04).
+
+## Your task
+
+Compute SAXPY: `y = a*x + y` for arrays of length `n = 1 << 25` (33M elements), updating `y` in place. The challenge: do it with a **fixed grid sized from the SM count** — *not* `ceil_div(n, block)` — so each thread visits multiple elements via a grid-stride loop.
+
+Edit `saxpy.cu` and fill the `TODO`s:
+
+1. The `__global__` kernel `saxpy` — compute your start index and the stride, then loop over the array doing `y[i] = a*x[i] + y[i]`.
+2. The host function `solve` — query the device, pick a grid of a few blocks per SM (independent of `n`), and launch. Wrap your runtime calls in `CUDA_CHECK(...)`.
+
+### The `solve` contract
 
 ```cpp
 void solve(float a, const float* x, float* y, int n);
 ```
 
-`x` and `y` are **device pointers** (already on the GPU) of length `n`; `a` is a host scalar. `y` is updated in place. Your job is only to launch the kernel.
+`x` and `y` are **device pointers** of length `n`; `a` is a plain host scalar (passed by value into the kernel — that's fine). `y` is read *and* written. The harness handles all allocation and copying.
 
-## The grid-stride pattern
+> **No separate boundary `if` needed.** Unlike exercise 01, the loop condition `i < n` *is* the guard — a thread simply stops when it strides past the end. One clean loop covers everything.
 
-In exercise 01 you sized the grid to the problem: one thread per element. Here you do the opposite — pick a **fixed** number of threads and let each one stride across the whole array:
+## Functions & syntax you'll need
 
-```cpp
-__global__ void k(/* ... */ int n) {
-    int idx    = blockIdx.x * blockDim.x + threadIdx.x;  // this thread's start
-    int stride = gridDim.x * blockDim.x;                 // total threads in grid
-    for (int i = idx; i < n; i += stride) {
-        // ... work on element i ...
-    }
-}
-```
+| Thing | Signature / form | What it does |
+|-------|------------------|--------------|
+| start index | `int idx = blockIdx.x * blockDim.x + threadIdx.x;` | This thread's first element. |
+| stride | `int stride = gridDim.x * blockDim.x;` | Total threads in the grid = the jump between passes. |
+| `gridDim.x` | built-in | Number of blocks in the grid (needed for the stride). |
+| `blockDim.x` | built-in | Threads per block (needed for the stride). |
+| `cudaGetDeviceProperties` | `cudaError_t cudaGetDeviceProperties(cudaDeviceProp* p, int dev);` | Fills `p` with device info; use device `0`. |
+| `cudaDeviceProp::multiProcessorCount` | `int` field | Number of SMs (40 on a T4) — base your grid on this. |
+| `CUDA_CHECK(...)` | macro | Wraps a runtime call; on failure prints `file:line` + error string and aborts. |
+| launch syntax | `saxpy<<<grid, block>>>(a, x, y, n);` | Launch with your fixed `grid` and `block`. |
 
-Thread 0 handles elements `0, stride, 2*stride, …`; thread 1 handles `1, 1+stride, …`; and so on. The whole array is covered no matter how large `n` is, with a grid you chose.
-
-## Why grid-stride beats one-thread-one-element here
-
-- **Flexible sizing.** One launch config handles *any* `n` — even `n` larger than the maximum grid dimension. You never recompute the grid from `n`.
-- **Thread/register reuse.** A launched thread amortizes its setup (index math, register allocation, block-scheduling cost) across many elements instead of doing one add and retiring. Fewer blocks means fewer block-scheduling/launch-tail overheads.
-- **Tunable occupancy.** You size the grid to *the machine* (a few blocks per SM) rather than to the data, which keeps every SM busy without spawning millions of one-shot blocks.
-
-A good launch is a few blocks per SM. Query the SM count at runtime:
+Querying the machine looks like:
 
 ```cpp
 cudaDeviceProp prop;
 CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-int blocks = prop.multiProcessorCount * SOME_SMALL_FACTOR;
+int grid = prop.multiProcessorCount * SOME_SMALL_FACTOR;  // e.g. 32
 ```
 
-## The `CUDA_CHECK` macro
+> **Fun fact — `CUDA_CHECK`.** Every CUDA runtime call returns a `cudaError_t`, and silently ignoring it is the #1 cause of baffling CUDA bugs (an error from call A surfaces three calls later). The macro turns a silent failure into a loud `file:line` message. Kernel *launches* don't return an error directly, so the harness calls `CUDA_CHECK_KERNEL()` after your `solve` to catch those — you don't need to.
 
-Every CUDA runtime call returns a `cudaError_t`. Silently ignoring it is the #1 source of mysterious CUDA bugs. Wrap calls in `CUDA_CHECK(...)` (from `common/cuda_utils.cuh`): on failure it prints `file:line`, the call, and the error string, then aborts.
+## How it's graded
 
-```cpp
-CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-```
+Run `python grade.py`:
 
-For kernel *launches* (which don't return an error directly) the harness uses `CUDA_CHECK_KERNEL()` after calling your `solve`, so you don't need to.
-
-## Grading (`!python grade.py`)
-
-- **correctness** — `y == a*x + y` within tolerance.
-- **efficiency** — SAXPY is memory-bound (read `x`, read `y`, write `y` ⇒ `3*bytes`). You must reach a healthy fraction of peak global-memory bandwidth (`bw_frac >= 0.55`). A correct grid-stride loop over a modest grid clears this with margin.
-- **source** — your kernel must contain an actual stride loop: the grade checks for both `gridDim.x` and `blockDim.x` (the stride is `gridDim.x * blockDim.x`).
+- **correctness** — `y == a*x + y` within tolerance (`max_abs_err <= 1e-3`).
+- **efficiency** — SAXPY is memory-bound: read `x`, read `y`, write `y` ⇒ `3 * bytes` moved. You must hit **`bw_frac >= 0.55`** of theoretical peak. A correct grid-stride loop over a modest grid clears this with margin; launching too few blocks (starving the SMs) or a degenerate single block would tank it.
+- **source** — your kernel must contain a real stride, so the grader checks the source for both `gridDim.x` and `blockDim.x`.
 
 Run `python grade.py --check-solution` to grade the reference solution instead of yours.
+
+## Going deeper
+
+- **One pattern, forever.** The grid-stride loop is the idiomatic shape for nearly every elementwise/streaming CUDA kernel. You'll reuse it in exercises 03, 05, and beyond. Internalize it now.
+- **Try this:** change the per-SM factor from `32` to `1` (one block per SM) and re-grade. With only 40 blocks, each SM can't keep enough warps in flight to hide memory latency, and `gbps` drops — a hands-on demonstration of why occupancy matters.
+- **Real cuBLAS** ships a hand-tuned `cublasSaxpy`; the grid-stride version you write here gets surprisingly close on a bandwidth-bound op like this one, because there's simply not much to optimize beyond "move bytes at full speed."

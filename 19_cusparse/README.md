@@ -1,120 +1,142 @@
 # Exercise 19 — cuSPARSE (the modern generic SpMV API)
+> You've hand-rolled three SpMV kernels — now call the one NVIDIA spent a decade tuning.
 
-**New concepts:** calling the vendor sparse library **cuSPARSE** through its
-**generic API** — opaque matrix/vector *descriptors*, the *buffer-size →
-allocate → execute* pattern, and why you reach for a library at all.
+## The idea
 
-## Why a library
+You now understand SpMV from the inside: scalar CSR, warp-per-row CSR, and ELL.
+That understanding is the whole point of the previous exercises — but in production
+you don't ship your own SpMV. You call **cuSPARSE**, NVIDIA's sparse library, whose
+kernels pick the layout and launch config per matrix and per GPU. Your hand kernels
+exist so you *know what it's doing* and can tell when a custom kernel is actually
+worth writing.
 
-You have now hand-written CSR-scalar, CSR-vector, and ELL SpMV. cuSPARSE has spent
-years tuning kernels that pick layouts and launch configs per matrix and per GPU.
-For production sparse work you call the library; your hand kernels exist so you
-*understand* what it's doing and can tell when a custom kernel is worth it.
+This exercise is about **using a library correctly**, which has its own idioms.
+You'll call `cusparseSpMV` to compute `y = alpha*A*x + beta*y` for a CSR matrix.
 
-## The modern generic API
+## Under the hood: the generic API design
 
-Older cuSPARSE had one function per (format × type), e.g. `cusparseScsrmv`. That
-**legacy API is deprecated** — do not use it. The modern **generic API** separates
-*describing your data* from *running the op*:
+Old cuSPARSE had one entry point per (format × datatype) — e.g. `cusparseScsrmv`
+for single-precision CSR. That combinatorial mess is the **legacy API, and it's
+deprecated** — don't use it. The **generic API** separates *describing your data*
+from *running the op*, so one `cusparseSpMV` works across CSR/COO/etc and across
+float/double/half:
 
 | Object | Created with | Represents |
 |--------|--------------|------------|
-| handle | `cusparseCreate` | library context (one per program) |
-| sparse matrix `A` | `cusparseCreateCsr` | your CSR arrays + dims, as an `cusparseSpMatDescr_t` |
-| dense vectors `x`, `y` | `cusparseCreateDnVec` | a device pointer + length, as `cusparseDnVecDescr_t` |
+| handle | `cusparseCreate` | the library context — one per program |
+| sparse matrix `A` | `cusparseCreateCsr` | your CSR arrays + dims, as a `cusparseSpMatDescr_t` |
+| dense vectors `x`, `y` | `cusparseCreateDnVec` | a device pointer + length, as a `cusparseDnVecDescr_t` |
 | the op | `cusparseSpMV` | `y = alpha*A*x + beta*y` |
+
+A *descriptor* is an opaque handle wrapping your pointers plus **type tags** that
+tell the library how to read the bytes (32-bit indices? 0- or 1-based? float or
+double?). The library never owns or copies your data — the descriptor just points
+at your existing device arrays.
 
 ### The buffer pattern (the part people miss)
 
-`cusparseSpMV` may need scratch space. You don't guess its size — you **ask**:
+`cusparseSpMV` may need scratch memory, and the amount depends on the matrix and
+the chosen algorithm. You don't guess it — you **ask**:
 
 1. `cusparseSpMV_bufferSize(...)` → writes the required `size_t bufferSize`.
-2. `cudaMalloc(&dBuffer, bufferSize)` → allocate exactly that (may be 0).
+2. `cudaMalloc(&dBuffer, bufferSize)` → allocate exactly that (it can be 0).
 3. `cusparseSpMV(...)` with that `dBuffer` → runs the multiply.
 
-The same `alpha`, `beta`, descriptors, algorithm, and compute type must be passed
-to both the `_bufferSize` query and the `cusparseSpMV` call.
+The query and the run must get the **same** `alpha`, `beta`, descriptors,
+operation, compute type, and algorithm — otherwise the size you asked for doesn't
+match the call you make. This *query → allocate → execute* dance recurs across cuda
+libraries (cuFFT, cuDNN, …); learn it once.
 
-## The task
+## A picture
 
-Compute `y = alpha*A*x + beta*y` for a CSR matrix `A` using `cusparseSpMV` with
+```text
+  cusparseCreate ──► handle ───────────────────────────────────────────┐
+                                                                        │
+  rowPtr,colIdx,vals ─► cusparseCreateCsr ─► matA (SpMatDescr) ─┐       │
+  x (len ncols)       ─► cusparseCreateDnVec ─► vecX ───────────┤       │
+  y (len nrows)       ─► cusparseCreateDnVec ─► vecY ───────────┤       │
+                                                                ▼       ▼
+                              cusparseSpMV_bufferSize(handle, …, &bufferSize)
+                                                                │
+                              cudaMalloc(&dBuffer, bufferSize)  │
+                                                                ▼
+                              cusparseSpMV(handle, …, dBuffer)  ──►  y = A*x
+                                                                │
+        destroy matA / vecX / vecY,  cudaFree(dBuffer),  cusparseDestroy(handle)
+```
+
+## Your task
+
+Compute `y = alpha*A*x + beta*y` for CSR `A` using `cusparseSpMV` with
 `CUSPARSE_SPMV_ALG_DEFAULT`. The harness calls your `solve` with `alpha=1, beta=0`
-(plain `y = A*x`), but implement the general form. Edit `cusparse_spmv.cu`:
+(plain `y = A*x`), but write the general form. Edit `cusparse_spmv.cu`:
 
 1. Create the handle.
 2. Create the CSR matrix descriptor and the two dense-vector descriptors.
-3. Query the buffer size, `cudaMalloc` the external buffer.
+3. Query the buffer size, then `cudaMalloc` the external buffer.
 4. Call `cusparseSpMV`.
 5. Destroy the descriptors, free the buffer, destroy the handle.
 
-You do **not** allocate the CSR / x / y device memory — the harness does, and calls
-your `solve(...)`.
+You do **not** allocate the CSR / x / y device memory — the harness does. A
+`CUSPARSE_CHECK` macro is already provided in the file (it works like `CUDA_CHECK`
+but for `cusparseStatus_t`), so wrap every cuSPARSE call in it.
 
-### `solve` signature (the contract)
+### The `solve` contract
 
 ```cpp
 void solve(const int* rowPtr, const int* colIdx, const float* vals,
            const float* x, float* y, int nrows, int ncols, int nnz);
 ```
 
-All pointers are **device pointers**. CSR layout: `rowPtr[nrows+1]`,
-`colIdx[nnz]`, `vals[nnz]`. `x` has length `ncols`, `y` has length `nrows`.
+All pointers are **device pointers**. CSR layout: `rowPtr[nrows+1]`, `colIdx[nnz]`,
+`vals[nnz]`. `x` has length `ncols`, `y` has length `nrows`.
 
-## Syntax / reference
+## Functions & syntax you'll need
 
-Add `#include <cusparse.h>`. Wrap calls in a status check (a `CUSPARSE_CHECK`
-macro is fine — analogous to `CUDA_CHECK`). Note the data types:
+Add `#include <cusparse.h>`. The grader compiles with `-lcusparse`.
 
-```cpp
-cusparseHandle_t handle;
-cusparseCreate(&handle);
+| Function | Signature (abbreviated) | Role |
+|----------|-------------------------|------|
+| `cusparseCreate` | `(cusparseHandle_t* handle)` | make the library context |
+| `cusparseCreateCsr` | `(&matA, nrows, ncols, nnz, rowPtr, colIdx, vals, idxType, idxType, idxBase, valType)` | wrap CSR arrays as a sparse descriptor |
+| `cusparseCreateDnVec` | `(&vec, size, ptr, valType)` | wrap a device pointer + length as a dense-vector descriptor |
+| `cusparseSpMV_bufferSize` | `(handle, op, &alpha, matA, vecX, &beta, vecY, computeType, alg, &bufferSize)` | **query** scratch size into `bufferSize` |
+| `cusparseSpMV` | `(handle, op, &alpha, matA, vecX, &beta, vecY, computeType, alg, dBuffer)` | run `y = alpha*A*x + beta*y` |
+| `cusparseDestroySpMat` / `cusparseDestroyDnVec` / `cusparseDestroy` | `(descriptor)` / `(handle)` | tear down what you created |
+| `cudaMalloc` / `cudaFree` | `(&dBuffer, bufferSize)` / `(dBuffer)` | allocate / free the external buffer |
 
-cusparseSpMatDescr_t matA;
-cusparseDnVecDescr_t vecX, vecY;
+Key constant values to pass:
 
-// CSR descriptor: note rowPtr/colIdx use 32-bit indices, vals are float.
-cusparseCreateCsr(&matA, nrows, ncols, nnz,
-                  (void*)rowPtr, (void*)colIdx, (void*)vals,
-                  CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                  CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+- **operation:** `CUSPARSE_OPERATION_NON_TRANSPOSE` (plain `A*x`, not `Aᵀx`)
+- **index type:** `CUSPARSE_INDEX_32I` (both `rowPtr` and `colIdx` are 32-bit)
+- **index base:** `CUSPARSE_INDEX_BASE_ZERO` (0-based CSR)
+- **value / compute type:** `CUDA_R_32F` (real 32-bit float; must match your data)
+- **algorithm:** `CUSPARSE_SPMV_ALG_DEFAULT`
 
-cusparseCreateDnVec(&vecX, ncols, (void*)x, CUDA_R_32F);
-cusparseCreateDnVec(&vecY, nrows, (void*)y, CUDA_R_32F);
+Two gotchas: `alpha`/`beta` are passed **by pointer** (`&alpha`, `&beta` — they're
+host floats here), and the *compute type* must match the *value type*. **Do not**
+call the legacy `cusparseScsrmv` — it's deprecated and the grader rejects it.
 
-float alpha = 1.0f, beta = 0.0f;        // pointers passed below
-size_t bufferSize = 0;
-cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                        &alpha, matA, vecX, &beta, vecY,
-                        CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize);
+## How it's graded
 
-void* dBuffer = nullptr;
-cudaMalloc(&dBuffer, bufferSize);
+Run `python grade.py` (or `--check-solution` for the reference). Built with
+`-lcusparse`.
 
-cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-             &alpha, matA, vecX, &beta, vecY,
-             CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, dBuffer);
+- **correctness** — `y == A*x` within tolerance, vs a CPU SpMV.
+- **efficiency** — the harness times a tiny hand-written scalar CSR kernel and
+  reports `speedup_vs_naive`. There is **no hard speedup threshold** — the bar is
+  *correct library usage*. It only requires `ms > 0`, i.e. the SpMV actually ran
+  and produced a finite timing.
+- **source** — you must call `cusparseSpMV`, and must **not** use the deprecated
+  `cusparseScsrmv`.
 
-// teardown
-cusparseDestroySpMat(matA);
-cusparseDestroyDnVec(vecX);
-cusparseDestroyDnVec(vecY);
-cudaFree(dBuffer);
-cusparseDestroy(handle);
-```
+## Going deeper
 
-`alpha` / `beta` are passed **by pointer** (host pointers here). The *compute
-type* (`CUDA_R_32F`) must match the value type.
-
-## Grading (`!python grade.py`)
-
-Compiled with `-lcusparse`.
-
-- **correctness** — `y == A*x` within tolerance (vs a CPU SpMV).
-- **efficiency** — the harness also runs a tiny hand-written scalar CSR kernel and
-  reports `speedup_vs_naive`. There's **no hard speedup threshold** (cuSPARSE
-  usually wins on large matrices, but the lesson is *correct library usage*), but
-  the SpMV must actually have run.
-- **source** — you must call `cusparseSpMV`, and you must **not** use the
-  deprecated legacy `cusparseScsrmv`.
-
-Run `python grade.py --check-solution` to grade the reference solution instead.
+- **`CUSPARSE_SPMV_ALG_DEFAULT` is a dispatcher.** Under the hood cuSPARSE inspects
+  your matrix and picks an implementation — often something like the CSR-vector or
+  merge-based kernel. There are also explicit algorithms (`..._CSR_ALG1/ALG2`) you
+  can force when profiling.
+- **Reuse the buffer.** If you call SpMV repeatedly on the same matrix (as in CG,
+  the next exercise), create the descriptors and allocate the buffer *once* and
+  reuse them — don't pay the setup per call. Here `solve` is self-contained, so it
+  builds and tears down each time, which is exactly what you'd *avoid* in a hot loop.

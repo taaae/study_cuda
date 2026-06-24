@@ -1,102 +1,122 @@
 # Exercise 22 — Double-Buffered Tiled GEMM
+> Hide global-load latency by computing on one tile while the next one is already on its way.
 
-**New concepts:** software pipelining / **double-buffering** (ping-pong) of
-shared-memory tiles to hide global-load latency in a tiled matrix multiply.
-
-## The stall you're removing
-
-A standard tiled GEMM walks the K dimension one tile at a time:
-
-```
+## The idea
+A standard tiled GEMM walks the K dimension one tile at a time, and every
+iteration looks like this:
+```text
 for each k-tile:
-    load A-tile, B-tile  from global -> shared
-    __syncthreads()              // wait so everyone sees the tile
+    load A-tile, B-tile   global -> shared
+    __syncthreads()        // wait so the tile is visible to everyone
     multiply-accumulate from shared
-    __syncthreads()              // wait so nobody overwrites the tile early
+    __syncthreads()        // wait so nobody overwrites the tile too early
+```
+Look at that first `__syncthreads()`. The threads are **stalled** there, doing
+nothing, while the global loads crawl back — and global memory has *hundreds* of
+cycles of latency. The math units are idle waiting for data.
+
+**Double-buffering** (a.k.a. software pipelining, or ping-pong) fixes this. Keep
+**two** shared tiles. While you do the multiply-accumulate on buffer *cur*, you
+simultaneously issue the loads for the **next** k-tile into buffer *nxt*. Those
+loads are in flight *during* the math, so the latency hides behind useful work
+instead of stalling on it. Each iteration you just swap which buffer is "current."
+
+## Under the hood
+There are two distinct wins here. First, the obvious one: **latency hiding**. The
+load instruction for the next tile returns immediately (it only *issues* the
+memory request); the data lands asynchronously into shared memory while the
+warp's `acc +=` loop runs. By the time you reach the bottom barrier, the tile is
+already there.
+
+Second, a subtle one: **you drop one of the two barriers per iteration**. The
+classic loop needs the *second* `__syncthreads()` to stop a fast thread from
+overwriting the shared tile before a slow thread finishes reading it. But when the
+next tile goes into a *different* buffer, there's nothing to protect — the current
+buffer is read-only this iteration. One barrier per iteration instead of two.
+
+> **Forward pointer — the Ampere connection:** On Ampere (sm_80+) and newer you'd
+> express this exact overlap with `cp.async` and `cuda::pipeline`, where the
+> hardware streams global→shared asynchronously without even occupying registers.
+> The **T4 (sm_75) has no `cp.async`** — so we do the portable, by-hand cousin:
+> register-prefetch into a second shared buffer. Same idea, older hardware. This
+> is why the speedup here is real but *modest* (≈1.1–1.3×); on Ampere the same
+> restructuring buys far more.
+
+> **Fun fact:** real libraries (cuBLAS, CUTLASS) pipeline *several* stages deep,
+> not just two, and combine it with register-level tiling. That's how they reach
+> ~90% of peak. Two-stage is the conceptual first step.
+
+## A picture
+```text
+Double-buffer ping-pong across the K-loop:
+
+ buffer 0:  [load t0]            [load t2]            ...
+ buffer 1:           [load t1]            [load t3]   ...
+ compute :        [== t0 ==][== t1 ==][== t2 ==]...
+                     ^ prefetch of t1 overlaps with compute on t0
+
+ cur flips:    0 -> 1 -> 0 -> 1 ...   (nxt = cur ^ 1 each iteration)
 ```
 
-The threads sit **idle** during that first `__syncthreads()` while the global
-loads land — and global memory has hundreds of cycles of latency. The compute
-units have nothing to do until the load returns.
-
-**Double-buffering** overlaps that load with useful work. You keep **two** shared
-tiles. While you compute on buffer *cur*, you simultaneously **prefetch the next
-k-tile into buffer *nxt***. The loads of the next tile are in flight *during* the
-math on the current tile, so the latency is hidden behind compute instead of
-stalling on it. Each iteration you swap the roles of the two buffers (ping-pong).
-
-This also removes one of the two `__syncthreads()` per iteration: because the
-next tile goes into a *different* buffer, you don't need a barrier to protect the
-current buffer from being overwritten.
-
-> **On Ampere and newer** you'd express the same overlap with `cp.async` and the
-> `cuda::pipeline` primitives, which do the async copy in hardware. The T4
-> (sm_75) has no `cp.async`, so we do the classic register-prefetch +
-> two-shared-buffer version — the same idea, by hand.
-
-## The task
-
-Compute `C = A * B` (row-major, all dimensions multiples of the tile size) with a
-tiled kernel that uses **two shared-memory tile buffers in ping-pong fashion**
-across the K-loop.
+## Your task
+Compute `C = A * B`, row-major, all dimensions multiples of `TILE` (= 32), with a
+tiled kernel that ping-pongs **two** shared tile buffers across the K-loop.
 
 Edit `gemm.cu`:
+1. `gemm_double_buffer` — prologue loads tile 0; the main loop prefetches `t+1`
+   into the other buffer, computes on the current buffer, one `__syncthreads()`,
+   then swaps.
+2. `solve` — launch a 2-D grid of `TILE × TILE` blocks.
 
-1. `gemm_double_buffer` — the double-buffered tiled kernel.
-2. `solve` — launch it with a 2-D grid of `TILE × TILE` blocks.
-
-### `solve` signature (the contract)
-
+### The `solve` contract
 ```cpp
 void solve(const float* A, const float* B, float* C, int M, int N, int K);
 ```
+All device pointers, all **row-major**: `A` is `M×K`, `B` is `K×N`, `C` is `M×N`.
+Indexing: `A[row*K + k]`, `B[k*N + col]`, `C[row*N + col]`. Dimensions are
+multiples of `TILE`, so no ragged-edge handling needed.
 
-All pointers are **device pointers**. `A` is `M×K`, `B` is `K×N`, `C` is `M×N`,
-all **row-major**. The harness uses dimensions that are multiples of `TILE`
-(= 32), so you do not need ragged-edge handling.
+## Functions & syntax you'll need
+| Construct | Form | Purpose |
+|---|---|---|
+| double shared buffers | `__shared__ float As[2][TILE][TILE];` | the `[2]` is the ping-pong dimension |
+| | `__shared__ float Bs[2][TILE][TILE];` | one A-buffer and one B-buffer per slot |
+| buffer index | `int cur = 0; int nxt = cur ^ 1;` | `^1` toggles between 0 and 1 cheaply |
+| `__syncthreads()` | `void __syncthreads()` | one per iteration, *after* the compute, before the swap |
+| `#pragma unroll` | before the inner `for (k...)` | lets the compiler unroll the TILE-length MAC loop |
+| thread/block coords | `threadIdx.{x,y}`, `blockIdx.{x,y}`, `blockDim` | map `(tx,ty)` to `(col,row)` |
 
-Row-major indexing: `A[row*K + k]`, `B[k*N + col]`, `C[row*N + col]`.
-
-## Syntax / reference
-
-Declare the two buffers as the leading dimension `[2]`:
-
+Skeleton of the loop (no full solution):
 ```cpp
-#define TILE 32
-__shared__ float As[2][TILE][TILE];
-__shared__ float Bs[2][TILE][TILE];
-int cur = 0;                       // which buffer we compute from
-```
-
-Sketch of the ping-pong loop:
-
-```cpp
-// prologue: load the first k-tile into buffer 0
-load_tile(As[0], Bs[0], /*k-tile=*/0);
-__syncthreads();
-
+// prologue: load k-tile 0 into buffer 0; __syncthreads();
 for (int t = 0; t < numTiles; ++t) {
     int nxt = cur ^ 1;
     if (t + 1 < numTiles)
-        load_tile(As[nxt], Bs[nxt], /*k-tile=*/t + 1);   // prefetch next
-    // compute on the CURRENT buffer while the prefetch is in flight
+        /* prefetch k-tile t+1 into As[nxt]/Bs[nxt] */;   // loads in flight
     for (int k = 0; k < TILE; ++k)
-        acc += As[cur][ty][k] * Bs[cur][k][tx];
-    __syncthreads();              // next tile is ready; swap
-    cur = nxt;
+        acc += As[cur][ty][k] * Bs[cur][k][tx];           // compute meanwhile
+    __syncthreads();                                       // next tile landed
+    cur = nxt;                                             // swap roles
 }
 ```
+That single barrier — issued *after* the prefetch instruction but used to gate the
+swap — is what overlaps the load with the math.
 
-The single `__syncthreads()` per iteration is what hides the latency: the
-`load_tile` issued at the top runs concurrently with the `acc +=` math.
+## How it's graded
+`python grade.py` (M=N=K=1024) checks:
+- **correctness** — `C == A*B` vs CPU, `max_rel_err <= 1e-3`.
+- **efficiency** — the harness times your kernel *and* a built-in single-buffer
+  tiled GEMM, and requires `speedup >= 1.10`. It also reports `gflops`. A correct
+  but single-buffered kernel will pass correctness but **fail the speedup gate**.
+- **source** — you must declare two shared buffers in `As[2][...][...]` style
+  (the grader greps for `[2][`).
 
-## Grading (`!python grade.py`)
+Run `python grade.py --check-solution` to grade the reference solution.
 
-- **correctness** — `C == A*B` within tolerance vs a CPU reference.
-- **efficiency** — the harness also runs a plain **single-buffer** tiled GEMM as
-  a baseline and requires `speedup >= 1.10`. (Double-buffering gains are real but
-  modest on T4.) Also reports `gflops`.
-- **source** — you must declare two shared tile buffers in the
-  `__shared__ float As[2][...][...]` style.
-
-Run `python grade.py --check-solution` to grade the reference solution instead.
+## Going deeper
+Try profiling with **Nsight Systems** (`nsys`) to see the two kernels' durations
+on a timeline — it usually works on Colab. (Nsight Compute's `ncu`, which would
+show you the memory-stall reduction directly, is often blocked on free Colab.) The
+natural next step is **register tiling**: have each thread compute a small `n×n`
+patch of C, multiplying the per-thread arithmetic intensity — that, stacked on top
+of double-buffering, is the real road to high GEMM throughput.

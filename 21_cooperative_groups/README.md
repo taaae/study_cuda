@@ -1,114 +1,118 @@
 # Exercise 21 — Cooperative Groups & Grid-Wide Sync
+> Make *all* blocks in a grid wait for each other — inside a single kernel launch.
 
-**New concepts:** the *cooperative groups* programming model, the `this_grid()`
-group and `grid.sync()` for a **grid-wide barrier inside a single kernel
-launch**, and the `cudaLaunchCooperativeKernel` launch path that makes it legal.
+## The idea
+You already know `__syncthreads()`: it's a barrier for **one block**. But there's
+a wall you keep hitting — there is no built-in barrier that synchronizes the
+*whole grid*. The classic workaround is to split the algorithm into **two kernel
+launches**, because the only guaranteed grid-wide sync point is the kernel
+boundary itself. That works, but it's wasteful: between the two launches every
+intermediate value goes back out to global memory and gets re-read.
 
-## The problem grid sync solves
+Cooperative groups give you a real grid-wide barrier: `this_grid().sync()`. After
+it returns, every thread in *every* block has reached the barrier, so anything
+written before it is visible to everyone after it. Now a two-phase algorithm —
+reduce, then use the result — fits in **one launch**, with the partial sum living
+in fast on-chip / L2 state instead of bouncing through DRAM twice.
 
-Normally a `__syncthreads()` only synchronizes **one block**. There is no built-in
-way for *all* blocks in a grid to wait for each other — the usual trick is to
-**split the work into two kernel launches** (the kernel boundary is the only
-guaranteed global sync). That works, but it re-reads everything from global
-memory between launches.
+Our task is to L2-normalize a vector in place: `out[i] = data[i] / sqrt(Σ data[j]²)`.
+Phase 1 computes the sum of squares; phase 2 divides by its square root. The
+barrier sits between them.
 
-Cooperative groups give you a real **grid-wide barrier**: `this_grid().sync()`.
-After it returns, every thread in *every* block is guaranteed to have reached the
-barrier, so writes made before it are visible to all threads after it. That lets
-you do a two-phase algorithm (reduce, then use the result) in **one launch**.
+## Under the hood
+There's a catch, and it's the whole reason `grid.sync()` needs special launch
+machinery. A grid barrier can only work if **every block is physically resident
+on the GPU at the same time** (co-resident). Picture it: if you launched more
+blocks than the SMs can hold, some blocks would still be queued, waiting to start
+— while the running blocks sit at the barrier waiting for *them*. Deadlock.
 
-The catch: grid sync only works if **every block is resident on the GPU at the
-same time** (co-resident). If you launched more blocks than fit, some would be
-waiting to start while others wait at the barrier — deadlock. So you must:
+So two rules fall out:
 
-1. Launch with `cudaLaunchCooperativeKernel` (not `<<< >>>`), which *checks*
-   co-residency and refuses to launch an over-subscribed grid.
-2. Size the grid to the **occupancy-limited** number of blocks, and use a
-   **grid-stride loop** so a smaller-than-data grid still covers all `n`
-   elements.
+1. **You must launch with `cudaLaunchCooperativeKernel`**, not `<<< >>>`. This
+   launch path checks co-residency and refuses an over-subscribed grid (rather
+   than deadlocking).
+2. **You size the grid to what actually fits.** Ask the occupancy API how many
+   blocks of your chosen size fit on one SM, multiply by the SM count, and use a
+   **grid-stride loop** so a smaller-than-data grid still covers all `n` elements.
 
-## The task
+> **Fun fact:** the T4 has 40 SMs. With 256-thread blocks you'll typically get a
+> grid of a few hundred blocks total — far fewer than the ~16K blocks a 4M-element
+> launch would normally spawn. The grid-stride loop is what lets that lean,
+> co-resident grid still touch every element.
 
-Normalize a float vector to **unit L2 norm, in place, in ONE kernel launch**:
+## A picture
+```text
+ONE LAUNCH, all blocks co-resident on the SMs:
 
+  block0  block1  block2  ...  blockG-1
+    |       |       |            |
+  [phase1: local sum-of-squares, then atomicAdd into *ssq]
+    |       |       |            |
+    v       v       v            v
+  =================== grid.sync() ===================   <-- every block waits here
+    |       |       |            |                          *ssq is now complete
+    v       v       v            v
+  [phase2: inv = rsqrtf(*ssq); data[i] *= inv]
 ```
-out[i] = data[i] / sqrt( sum_j data[j]^2 )
-```
+Without the barrier, a fast block could reach phase 2 and read `*ssq` while a slow
+block hasn't added its contribution yet — silent wrong answers.
 
-The kernel runs in two phases separated by a grid barrier:
-
-- **Phase 1** — every thread accumulates `data[i]*data[i]` (over its grid-stride
-  range) into a per-block partial, then one thread `atomicAdd`s the block partial
-  into a single global accumulator `*ssq`.
-- **`grid.sync()`** — wait until *all* blocks have finished their `atomicAdd`, so
-  `*ssq` now holds the complete sum of squares.
-- **Phase 2** — compute `inv = rsqrtf(*ssq)` and every thread multiplies its
-  elements by `inv`.
-
+## Your task
 Edit `normalize.cu`:
+1. `normalize_kernel` — phase 1 (grid-stride sum of squares → block reduction →
+   `atomicAdd` into `*ssq`), then `grid.sync()`, then phase 2 (scale by `rsqrtf`).
+2. `solve` — size a co-resident grid, allocate/zero the global accumulator, and
+   launch cooperatively.
 
-1. The kernel `normalize_kernel` — phases 1 and 2 with `grid.sync()` between them.
-2. The host `solve` — size a co-resident grid and launch with
-   `cudaLaunchCooperativeKernel`.
-
-### `solve` signature (the contract)
-
+### The `solve` contract
 ```cpp
 void solve(float* data, int n);   // normalizes data in place
 ```
+`data` is a **device pointer** of length `n`. Allocate a tiny device scratch
+`float* ssq` inside `solve`, zero it with `cudaMemset`, and `cudaFree` it after.
 
-`data` is a **device pointer** of length `n`. You also need a small device
-scratch for the global accumulator (`float* ssq`) — allocate it inside `solve`,
-zero it with `cudaMemset`, and free it after.
+## Functions & syntax you'll need
+| Function / construct | Signature (essentials) | What it does |
+|---|---|---|
+| header | `#include <cooperative_groups.h>` | brings in the cooperative-groups API |
+| namespace | `namespace cg = cooperative_groups;` | conventional short alias |
+| `cg::this_grid()` | `cg::grid_group cg::this_grid()` | handle to the entire grid as one group |
+| `grid.sync()` | `void grid_group::sync()` | grid-wide barrier (all blocks wait) |
+| `cudaOccupancyMaxActiveBlocksPerMultiprocessor` | `(int* numBlocks, const void* kernel, int blockSize, size_t dynSmem)` | how many blocks fit per SM |
+| `cudaGetDeviceProperties` | `(cudaDeviceProp* p, int dev)` | read `p->multiProcessorCount` (SM count) |
+| `cudaLaunchCooperativeKernel` | `((void*)kernel, dim3 grid, dim3 block, void** args, size_t dynSmem, cudaStream_t)` | the co-resident-checked launch path |
+| `atomicAdd` | `float atomicAdd(float* addr, float val)` | race-free add into `*ssq` |
+| `rsqrtf` | `float rsqrtf(float x)` | fast `1/sqrt(x)` |
+| `__syncthreads()` | `void __syncthreads()` | still needed for the per-block reduction |
 
-## Syntax / reference
-
+The cooperative launch takes arguments as an **array of addresses-of-arguments**:
 ```cpp
-#include <cooperative_groups.h>
-namespace cg = cooperative_groups;
-
-__global__ void normalize_kernel(float* data, int n, float* ssq) {
-    cg::grid_group grid = cg::this_grid();     // the whole grid as a group
-    // ... phase 1: atomicAdd into *ssq ...
-    grid.sync();                               // grid-wide barrier
-    // ... phase 2: read *ssq, scale data ...
-}
+cg::grid_group grid = cg::this_grid();   // in the kernel
+// ...
+grid.sync();
 ```
-
-**Sizing a co-resident grid.** Ask the occupancy API how many blocks of your
-chosen size fit on **one** SM, multiply by the SM count:
-
 ```cpp
-int block = 256;
-int blocksPerSM = 0;
-cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-    &blocksPerSM, normalize_kernel, block, /*dynamicSmem=*/0);
-cudaDeviceProp prop; cudaGetDeviceProperties(&prop, 0);
-int grid = blocksPerSM * prop.multiProcessorCount;   // all blocks co-resident
-```
-
-**Launching cooperatively.** Unlike `<<< >>>`, the cooperative launch takes the
-kernel arguments as an **array of pointers-to-arguments**:
-
-```cpp
-void* args[] = { &data, &n, &ssq };
+void* args[] = { &data, &n, &ssq };      // in solve(): each entry is &variable
 cudaLaunchCooperativeKernel((void*)normalize_kernel,
-                            dim3(grid), dim3(block),
-                            args, /*dynamicSmem=*/0, /*stream=*/0);
+                            dim3(grid), dim3(block), args, 0, 0);
 ```
 
-Each element of `args` is the **address of** the variable holding that argument.
+## How it's graded
+`python grade.py` builds with `-rdc=true` (cooperative launch requires
+relocatable device code) and checks:
+- **correctness** — output equals the CPU L2-normalized vector, `max_abs_err <= 1e-5`.
+- **efficiency** — reports `ms` for the single fused launch (the win is *not*
+  re-reading 4M floats between two launches).
+- **source** — your code must contain `grid.sync` *and* `cudaLaunchCooperativeKernel`.
+  A two-launch solution, even if correct, fails the source check — the point is to
+  use the real grid barrier.
 
-## Grading (`!python grade.py`)
+The harness probes `cudaDevAttrCooperativeLaunch` first; the T4 supports it. On a
+GPU that doesn't, it prints `# SKIP` and reports correct so grading won't
+false-fail. Use `python grade.py --check-solution` to grade the reference instead.
 
-- **correctness** — output equals the CPU L2-normalized vector within tolerance.
-- **efficiency** — reports `ms` (one fused launch instead of two).
-- **source** — you must use cooperative groups (`grid.sync`) and launch with
-  `cudaLaunchCooperativeKernel`.
-
-The harness checks `cudaDevAttrCooperativeLaunch` at runtime; on the T4 it is
-supported. If you ever run on a GPU without it, the harness prints
-`# SKIP: cooperative launch unsupported` and reports correct so grading does not
-false-fail.
-
-Run `python grade.py --check-solution` to grade the reference solution instead.
+## Going deeper
+Cooperative groups are more than grid sync: `cg::tiled_partition<32>(block)` gives
+you a warp-sized group with `.shfl_down()` and `.reduce()` — a cleaner, portable
+way to write the block reduction than raw `__shfl_*` intrinsics. And on multi-GPU
+boxes, `this_multi_grid()` extends the barrier across devices.

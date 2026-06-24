@@ -1,96 +1,143 @@
 # Exercise 10 — Parallel Prefix Sum (Scan)
+> Turning a stubbornly sequential running total into an O(n)-work parallel tree climb.
 
-**New concepts:** the *scan* primitive (prefix sum), the **work-efficient Blelloch** algorithm (up-sweep / down-sweep) in shared memory, composing a large scan out of per-block scans, and **bank conflicts** in shared-memory scans.
+## The idea
+A **scan** (prefix sum) turns `[3,1,7,0,4]` into its running totals. It looks
+hopelessly sequential — each output seems to need the one before it — yet it's one
+of the most important parallel primitives there is: it's the engine behind stream
+compaction, radix sort, sparse-matrix ops, and allocation of variable-length
+output. Learn to parallelize scan and a whole class of "I thought this had to be a
+loop" problems opens up.
 
-## Inclusive vs exclusive scan
+Two flavors, given `in = [3, 1, 7, 0, 4]`:
 
-Given `in = [3, 1, 7, 0, 4]`:
+| kind | result | rule |
+|------|--------|------|
+| **inclusive** | `[3, 4, 11, 11, 15]` | `out[i] = in[0] + … + in[i]` |
+| **exclusive** | `[0, 3, 4, 11, 11]` | `out[i] = in[0] + … + in[i-1]`, `out[0]=0` |
 
-| scan kind | result | rule |
-|-----------|--------|------|
-| **inclusive** | `[3, 4, 11, 11, 15]` | `out[i] = in[0] + ... + in[i]` |
-| **exclusive** | `[0, 3, 4, 11, 11]` | `out[i] = in[0] + ... + in[i-1]`, `out[0] = 0` |
+This exercise computes the **exclusive** scan. (Inclusive is just
+`exclusive[i] + in[i]`.)
 
-This exercise computes the **exclusive** scan. (Inclusive is just exclusive shifted, or `exclusive[i] + in[i]`.)
+## Under the hood
+The naive parallel scan (Hillis–Steele) does `O(n log n)` adds — every element is
+touched in each of the `log n` passes. The **work-efficient Blelloch** algorithm
+does only `O(n)` adds, the same as a sequential loop, by sweeping a balanced binary
+tree **twice**:
 
-## Why "work-efficient"?
+- **Up-sweep (reduce):** leaves → root, summing pairs in place. When it finishes,
+  the last slot holds the grand total.
+- **Down-sweep:** set the root to the identity `0`, then root → leaves: at each
+  node, hand the left child's *old* value to the right child and push the running
+  sum down the left.
 
-The simplest parallel scan (Hillis–Steele) does `O(n log n)` adds — every element is touched at each of the `log n` passes. The **Blelloch** algorithm does only `O(n)` adds, the same as the sequential loop, in two phases over a balanced binary tree:
+That `O(n)` work is why it scales — it doesn't waste bandwidth re-reading data.
 
-- **Up-sweep (reduce):** walk the tree from leaves to root, summing pairs. After this the last slot holds the total.
-- **Down-sweep:** set the root to the identity (0), then walk back down, at each node passing the left child's old value to the right and the sum down the left.
+**Bank conflicts** are the catch. Shared memory has 32 banks; the Blelloch index
+pattern `offset*(2*tid+1)-1` makes many threads land in the *same* bank, serializing
+the access. The classic fix is **conflict-free padding** — spread indices apart by
+`index >> 5` extra slots. You can pass correctness without it, but padding is *the*
+reason real scan code looks the way it does.
 
-That `O(n)` work is why it scales: it does not waste memory bandwidth re-reading data.
+A single block can't scan a million elements, so you compose: scan each block's
+chunk, scan the per-block totals, then add each block's offset back.
 
-## The task
+## A picture
+```text
+  Blelloch on [3 1 7 0]  (TILE = 4)
 
-Compute the exclusive prefix sum of a large `int` array. A single block cannot scan millions of elements, so use the classic **three-phase** design:
+  UP-SWEEP (sum pairs, climb)        DOWN-SWEEP (clear root, descend)
+   3  1  7  0                          3  4  7  11   <- total at root
+   3 [4] 7 [7]    bi += ai             3 [0] 7 [4]   root := 0
+   3  4  7 [11]   total at last        3  0  7 [0]   swap+add left/right
+                                       ----------------------------------
+   exclusive result:  [0, 3, 4, 11]
+```
 
-1. **Per-block scan.** Each block loads a chunk into `__shared__` memory and Blelloch-scans it. Process **2 elements per thread** (a block of `B` threads scans `2*B` elements). Each block also records the *total* of its chunk into an auxiliary array `blockSums[blockId]`.
-2. **Scan the block sums.** Exclusive-scan `blockSums` so that `blockSums[b]` becomes the offset that block `b`'s results must be shifted by. (For the array sizes here a single extra scan launch over the block totals is enough — but think about how you would recurse if there were too many blocks.)
-3. **Add offsets.** Each block adds its `blockSums[b]` to every element it scanned.
+Three-phase composition for the whole array:
+```text
+  in ─► [scan_block]×G ─► out (each chunk scanned) + blockSums[g] (chunk totals)
+                                         │
+                          [scan_block]×1 ▼  exclusive-scan the totals
+                                  blockOffsets[g]
+                                         │
+  out ◄────────── [add_offsets]: out[i] += blockOffsets[g]  ◄──────────┘
+```
 
-### `solve` signature (the contract)
+## Your task
+Edit `scan.cu` and fill in the `TODO`s. `BLOCK=512`, `TILE=2*BLOCK=1024` (each
+thread handles **2 elements**).
 
+1. **`scan_block`** — load `TILE` elements (0 past the end) into dynamic shared
+   memory, run the up-sweep, save the root into `blockSums[blockIdx.x]` and clear
+   it, run the down-sweep, write results back to `out` (range-guarded).
+2. **`solve`** — launch phase 1; phase 2 re-uses `scan_block` on the block totals
+   in a single block (here `numBlocks <= TILE`, so one launch suffices); phase 3
+   launches `add_offsets`. Allocate and **free** any scratch.
+
+`add_offsets` is already written for you.
+
+### The `solve` contract
 ```cpp
 void solve(const int* in, int* out, int n);
 ```
+`in` and `out` are **device pointers** of length `n`. You own all kernel launches
+and any scratch (`blockSums`, `blockOffsets`) allocation — free what you allocate.
+`n` need not be a power of two or a multiple of `TILE`.
 
-`in` and `out` are **device pointers** of length `n`. You own all kernel launches and any scratch (`blockSums`) allocation; free what you allocate. `n` is not necessarily a power of two or a multiple of the block tile.
+## Functions & syntax you'll need
+| Construct | Form | What it does |
+|-----------|------|--------------|
+| dynamic shared mem | `extern __shared__ int s[];` | size set at launch (3rd `<<<>>>` arg) |
+| launch w/ shared | `kernel<<<grid, block, shBytes>>>(…)` | `shBytes = TILE*sizeof(int)` |
+| `__syncthreads()` | `void __syncthreads()` | block barrier; needed before each sweep level |
+| `cudaMalloc` | `cudaMalloc(&p, bytes)` | scratch for `blockSums` / `blockOffsets` |
+| `cudaFree` | `cudaFree(p)` | release scratch |
+| `ceil_div` | `ceil_div(n, TILE)` (`cuda_utils.cuh`) | number of blocks |
+| `CONFLICT_FREE_OFFSET` | `((i) >> 5)` (optional) | conflict-free padding macro |
 
-## Bank conflicts (optional, but it's why scan code looks weird)
-
-Shared memory has 32 banks. The Blelloch index pattern `2*offset*(tid+1)-1` makes many threads hit the *same* bank, serializing accesses. The standard fix is **conflict-free padding**: spread indices out by adding `index >> LOG_NUM_BANKS` extra slots. A macro makes this readable:
-
-```cpp
-#define LOG_NUM_BANKS 5                       // 32 banks on all CUDA GPUs
-#define CONFLICT_FREE_OFFSET(i) ((i) >> LOG_NUM_BANKS)
-// then index shared memory as  s[i + CONFLICT_FREE_OFFSET(i)]
-```
-
-You can pass the exercise without padding (correctness does not depend on it), but it is the difference between a slow and a fast scan, and it is *the* thing that makes real scan code look the way it does.
-
-## Syntax / reference
-
-```cpp
-extern __shared__ int s[];                    // dynamic shared memory
-kernel<<<grid, block, sharedBytes>>>(...);    // 3rd launch arg = bytes of shared mem
-__syncthreads();                              // barrier across the block
-CUDA_CHECK(cudaMalloc(&blockSums, ...));      // scratch for phase 1/2
-```
-
-Up-sweep / down-sweep skeleton for a tile of size `m == 2*blockDim.x` in `s[]`:
-
+Up/down-sweep skeleton for a tile of `m == 2*blockDim.x` in `s[]`:
 ```cpp
 int tid = threadIdx.x, offset = 1;
-// up-sweep
-for (int d = m >> 1; d > 0; d >>= 1) {
+for (int d = m >> 1; d > 0; d >>= 1) {            // up-sweep
     __syncthreads();
     if (tid < d) {
-        int ai = offset*(2*tid+1) - 1;
-        int bi = offset*(2*tid+2) - 1;
+        int ai = offset*(2*tid+1) - 1, bi = offset*(2*tid+2) - 1;
         s[bi] += s[ai];
     }
     offset <<= 1;
 }
-// clear last element, then down-sweep
-if (tid == 0) s[m-1] = 0;
-for (int d = 1; d < m; d <<= 1) {
-    offset >>= 1;
-    __syncthreads();
+if (tid == 0) s[m-1] = 0;                          // clear root
+for (int d = 1; d < m; d <<= 1) {                 // down-sweep
+    offset >>= 1; __syncthreads();
     if (tid < d) {
-        int ai = offset*(2*tid+1) - 1;
-        int bi = offset*(2*tid+2) - 1;
+        int ai = offset*(2*tid+1) - 1, bi = offset*(2*tid+2) - 1;
         int t = s[ai]; s[ai] = s[bi]; s[bi] += t;
     }
 }
 __syncthreads();
 ```
 
-## Grading (`!python grade.py`)
+## How it's graded
+`python grade.py` checks:
 
-- **correctness** — output matches a CPU exclusive scan exactly (integers).
-- **efficiency** — `bw_frac >= 0.30`. Scan is multi-pass (it reads and writes the data more than once and touches the block sums), so the bar is deliberately lenient compared to a single-pass kernel.
-- **source** — you must use `__shared__` memory and `__syncthreads()`.
+- **correctness** — output matches a CPU exclusive scan **exactly** (integers, no
+  tolerance). The harness prints the first mismatch index if you're off.
+- **efficiency** — `bw_frac >= 0.30` (achieved GB/s vs T4 peak). Scan is
+  multi-pass — it reads/writes the data more than once and touches the block sums —
+  so the bar is deliberately lenient versus a single-pass kernel. A Hillis–Steele
+  (`O(n log n)`) kernel does far more memory traffic and tends to miss this bar.
+- **source** — you must use `__shared__` and `__syncthreads`.
 
-Run `python grade.py --check-solution` to grade the reference solution instead of yours.
+Run `python grade.py --check-solution` to grade the reference solution instead of
+yours.
+
+## Going deeper
+- **Recursion:** if `numBlocks > TILE`, phase 2 itself needs more than one block —
+  you'd recurse the same three-phase scheme on the block totals.
+- **Real libraries:** in production you'd just call `cub::DeviceScan::ExclusiveSum`
+  or `thrust::exclusive_scan`. CUB uses the **temp-storage two-call idiom**: call
+  once with `d_temp_storage = nullptr` to learn the byte count, `cudaMalloc` it,
+  then call again to run. CUB's chained-scan / decoupled-look-back does the whole
+  array in a **single pass** — far faster than this three-pass version, but this
+  exercise is where you learn *why* it works.
