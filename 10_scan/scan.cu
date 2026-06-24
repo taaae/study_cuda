@@ -19,28 +19,24 @@ __global__ void scan_block(const int* in, int* out, int* blockSums, int n) {
     int ai     = 2 * tid;             // this thread's two local slots
     int bi     = 2 * tid + 1;
 
-    // Load two elements (0 past the end). Use base+ai and base+bi globally.
-    // TODO: s[ai] = (base + ai < n) ? in[base + ai] : 0;
-    // TODO: s[bi] = (base + bi < n) ? in[base + bi] : 0;
+    // TODO: load this thread's two elements into shared memory, using 0 for
+    //       out-of-range slots (the additive identity). (See README + hints.md.)
 
     int offset = 1;
 
     // --- up-sweep (reduce) over the tile -----------------------------------
-    // for d = TILE/2 down to 1: thread tid<d combines s[off*(2tid+1)-1] into
-    // s[off*(2tid+2)-1]; double offset each step. Barrier before each level.
-    // TODO: write the up-sweep loop here.
+    // TODO: run the Blelloch up-sweep: combine pairs up the tree, doubling the
+    //       offset each level, with a barrier before each level.
 
     // Save the block total (root of the tree) and clear it for the down-sweep.
     if (tid == 0) {
-        // TODO: blockSums[blockIdx.x] = s[TILE - 1];
-        // TODO: s[TILE - 1] = 0;
+        // TODO: record the tile total into blockSums, then zero the root so the
+        //       down-sweep produces an EXCLUSIVE scan.
     }
 
     // --- down-sweep --------------------------------------------------------
-    // for d = 1 up to TILE: halve offset; thread tid<d does the swap-and-add:
-    //   t = s[ai']; s[ai'] = s[bi']; s[bi'] += t;   (ai',bi' use offset)
-    // Barrier before each level.
-    // TODO: write the down-sweep loop here.
+    // TODO: run the Blelloch down-sweep: halve the offset each level and do the
+    //       swap-and-add at each node, with a barrier before each level.
 
     __syncthreads();
 
@@ -73,17 +69,17 @@ void solve(const int* in, int* out, int n) {
     CUDA_CHECK(cudaMalloc(&blockOffsets, numBlocks * sizeof(int)));
 
     // Phase 1: per-block scan + record block totals.
-    // TODO: launch scan_block<<<numBlocks, BLOCK, shBytes>>>(in, out, blockSums, n);
+    // TODO: launch scan_block over the input (one block per tile, shBytes of
+    //       dynamic shared memory).
 
     // Phase 2: exclusive-scan the block totals into blockOffsets.
     // For the sizes used here numBlocks <= TILE, so ONE scan_block over the
-    // totals suffices (its own block-sum output can be ignored). Reuse the
-    // kernel: scan_block(blockSums, blockOffsets, <scratch>, numBlocks).
-    // TODO: allocate a 1-int scratch and launch one scan_block to scan the
-    //       block totals (grid = 1 block). Then free that scratch.
+    // totals suffices (its own block-sum output can be ignored).
+    // TODO: allocate a small scratch and launch one scan_block (grid = 1) to
+    //       scan the block totals into blockOffsets, then free the scratch.
 
     // Phase 3: add offsets back.
-    // TODO: launch add_offsets<<<numBlocks, BLOCK>>>(out, blockOffsets, n);
+    // TODO: launch add_offsets to add each block's offset to its output range.
 
     CUDA_CHECK(cudaFree(blockSums));
     CUDA_CHECK(cudaFree(blockOffsets));

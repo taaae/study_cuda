@@ -12,32 +12,25 @@
 // Fast stencil. Intended approach: load a (BX+2)x(BY+2) tile (interior + 1-pixel
 // halo) into shared memory, __syncthreads(), then read the 5 neighbors from shared.
 __global__ void stencil_fast(const float* in, float* out, int width, int height) {
-    // TODO: __shared__ float s[BY + 2][BX + 2];
+    // TODO: declare a (BX+2)x(BY+2) shared tile (interior + 1-pixel halo).
 
     int x = blockIdx.x * BX + threadIdx.x;
     int y = blockIdx.y * BY + threadIdx.y;
 
     // Helper idea: clamp a coordinate into [0, n-1] before reading global memory.
-    //   auto clampi = [](int v, int n) { return v < 0 ? 0 : (v >= n ? n - 1 : v); };
 
-    // TODO: load the interior pixel for this thread into s[ty+1][tx+1]
-    //       (clamp x,y so threads past the image edge still read a valid pixel).
+    // TODO: load each thread's interior pixel into the shared tile, clamping
+    //       coordinates so threads past the image edge still read a valid pixel.
 
-    // TODO: load the halo. The simplest correct scheme: a few threads on each
-    //       edge of the block load the extra border row/column, applying the same
-    //       clamp. Then __syncthreads().
+    // TODO: load the 1-pixel halo border (edge threads fetch the extra row/column,
+    //       same clamp), then __syncthreads().
 
-    // TODO: compute from shared and write out[y*width + x] if (x<width && y<height):
-    //   float c = s[ty+1][tx+1];
-    //   float l = s[ty+1][tx], r = s[ty+1][tx+2];
-    //   float u = s[ty][tx+1], d = s[ty+2][tx+1];
-    //   out[y*width + x] = (c + l + r + u + d) * 0.2f;
+    // TODO: read the 5 neighbors from the shared tile, apply the 5-point average,
+    //       and write out the result for in-bounds pixels.
+    // (See README's function table and hints.md if stuck.)
     (void)x; (void)y; (void)width; (void)height;
 }
 
 void solve(const float* in, float* out, int width, int height) {
-    // TODO:
-    //   dim3 block(BX, BY);
-    //   dim3 grid(ceil_div(width, BX), ceil_div(height, BY));
-    //   stencil_fast<<<grid, block>>>(in, out, width, height);
+    // TODO: launch stencil_fast with BX x BY blocks covering the image. (See README + hints.md.)
 }

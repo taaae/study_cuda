@@ -7,22 +7,23 @@
 // Ap = A * p   (CSR, one thread per row).
 __global__ void spmv_csr(const int* rowPtr, const int* colIdx, const float* vals,
                          const float* p, float* Ap, int n) {
-    // TODO: one thread per row; sum vals[j]*p[colIdx[j]] over rowPtr[row]..rowPtr[row+1].
+    // TODO: one thread per row; accumulate this row's CSR nonzeros into Ap.
 }
 
 // out += sum_i a[i]*b[i].  Caller MUST zero *out before launching.
 __global__ void dot(const float* a, const float* b, float* out, int n) {
-    // TODO: per-thread product -> shared-memory block reduction -> atomicAdd(out, s[0]).
+    // TODO: per-thread products, block reduce in shared memory, atomicAdd into *out.
 }
 
 // y[i] += alpha * x[i]
 __global__ void axpy(float alpha, const float* x, float* y, int n) {
-    // TODO: y[i] += alpha * x[i] with a boundary guard.
+    // TODO: scaled vector add y += alpha*x, one guarded thread per element.
 }
 
 // p[i] = x[i] + beta * p[i]   (scales the DESTINATION, then adds x)
 __global__ void xpay(const float* x, float beta, float* p, int n) {
-    // TODO: p[i] = x[i] + beta * p[i] with a boundary guard.
+    // TODO: scale the destination then add x (p = x + beta*p), one guarded
+    //       thread per element.
 }
 
 // ---- Host driver ----------------------------------------------------------
@@ -30,18 +31,15 @@ __global__ void xpay(const float* x, float beta, float* p, int n) {
 // Solve A x = b to ||b - A x|| / ||b|| < tol, or maxiter iterations.
 void solve(const int* rowPtr, const int* colIdx, const float* vals,
            const float* b, float* x, int n, int maxiter, float tol) {
-    // TODO: allocate device scratch r, p, Ap (length n) and a device scalar.
-    // TODO: x is already 0, so r = b and p = b (device-to-device copies).
-    // TODO: rsold = r·r ;  bnorm2 = b·b   (dot kernel, scalar copied back).
-    // TODO: loop:
-    //   Ap = A*p (spmv_csr)
-    //   pAp = p·Ap (dot)
-    //   alpha = rsold / pAp
-    //   x += alpha*p  ;  r -= alpha*Ap   (axpy, note the minus for r)
-    //   rsnew = r·r (dot)
-    //   if sqrt(rsnew)/sqrt(bnorm2) < tol: break
-    //   beta = rsnew / rsold
-    //   p = r + beta*p   (xpay)
-    //   rsold = rsnew
+    // Assemble standard CG from the kernels above.
+    // TODO: allocate device scratch (r, p, Ap of length n) plus a device scalar
+    //       to receive dot results.
+    // TODO: initialize the residual and search direction from the fact that x=0,
+    //       and seed rsold = r·r and the b-norm used for the stopping test.
+    // TODO: each iteration is one SpMV + two dot products + axpy/xpay updates:
+    //       form Ap, get the step size from rsold and p·Ap, update x and the
+    //       residual r (mind the sign), recompute the residual norm, test for
+    //       convergence, then build the next direction from beta = rsnew/rsold.
+    //       (See README's function table + hints.md for the exact recurrences.)
     // TODO: free your scratch before returning.
 }

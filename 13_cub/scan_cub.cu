@@ -10,14 +10,13 @@ void solve(const int* in, int* out, int n) {
     void*  d_temp = nullptr;
     size_t temp_bytes = 0;
 
-    // 1) Sizing pass: with d_temp == nullptr, CUB just fills temp_bytes.
-    // TODO: cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, in, out, n);
+    // 1) Sizing pass: call cub::DeviceScan::ExclusiveSum with d_temp == nullptr
+    //    so CUB just fills temp_bytes.
+    // TODO: sizing call.
 
     // 2) Allocate the scratch CUB asked for.
-    // TODO: CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
+    // TODO: cudaMalloc d_temp to temp_bytes.
 
-    // 3) Real pass: same call, now with valid scratch.
-    // TODO: cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, in, out, n);
-
-    // TODO: CUDA_CHECK(cudaFree(d_temp));
+    // 3) Real pass: same ExclusiveSum call, now with valid scratch; then free it.
+    // TODO: run the scan and free the scratch. (See README + hints.md.)
 }

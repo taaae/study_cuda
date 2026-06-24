@@ -10,27 +10,16 @@
 
 // Each block sums a chunk of `in` into a single block-level partial, then
 // contributes it to the global total at *out.
-//
-// Recommended structure (see README's optimization ladder):
-//   1. Each thread walks `in` with a grid-stride loop, accumulating into a
-//      register `sum` (this is "first add during load", generalized).
-//   2. Store `sum` into __shared__ sdata[tid].
-//   3. __syncthreads(), then a SEQUENTIAL-ADDRESSING tree:
-//        for (s = blockDim.x/2; s > 0; s >>= 1) { if (tid < s) sdata[tid]+=sdata[tid+s]; __syncthreads(); }
-//   4. Thread 0 does ONE atomicAdd(out, sdata[0]).
 __global__ void reduce(const float* in, float* out, int n) {
-    // TODO: declare __shared__ float sdata[BLOCK];
-    // TODO: int tid = threadIdx.x;
-    // TODO: grid-stride accumulate into a register
-    // TODO: write register into sdata[tid], __syncthreads()
-    // TODO: sequential-addressing reduction tree with __syncthreads()
-    // TODO: if (tid == 0) atomicAdd(out, sdata[0]);
+    // TODO: accumulate this thread's slice of `in` with a grid-stride loop,
+    //       then reduce the block's values in shared memory (sequential-addressing
+    //       tree) and have thread 0 atomicAdd the block result into *out.
+    //       (See README's optimization ladder + hints.md.)
 }
 
 // Host entry point. in and out are DEVICE pointers; *out is already zeroed.
 // Pick a launch configuration and launch reduce.
 void solve(const float* in, float* out, int n) {
-    // TODO: choose block = BLOCK and a grid size (cap it so blocks stay full;
-    //       the grid-stride loop handles any leftover), then launch
-    //       reduce<<<grid, BLOCK>>>(in, out, n);
+    // TODO: choose block = BLOCK and a capped grid size (the grid-stride loop
+    //       handles any leftover), then launch reduce. (See README + hints.md.)
 }

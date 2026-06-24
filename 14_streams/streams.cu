@@ -4,7 +4,8 @@
 
 // Element-wise map: y = sqrt(x) * x + 1. Grid-stride so any chunk size works.
 __global__ void map_kernel(const float* x, float* y, int n) {
-    // TODO: grid-stride loop computing y[i] = sqrtf(x[i]) * x[i] + 1.0f
+    // TODO: with a grid-stride loop, set y = sqrt(x)*x + 1 for each element.
+    //       (See README + hints.md.)
 }
 
 // Host entry point. h_in / h_out are PINNED host pointers of length n.
@@ -15,19 +16,15 @@ void solve(const float* h_in, float* h_out, int n, int nStreams) {
     const int block = 256;
     int chunk = ceil_div(n, nStreams);   // elements per chunk (last one is smaller)
 
-    // TODO: allocate ONE device buffer for inputs and ONE for outputs, each big
-    //       enough to hold the whole array (so every chunk has a home).
+    // TODO: allocate device input and output buffers large enough for the whole
+    //       array, and create nStreams streams.
     float* d_in  = nullptr;
     float* d_out = nullptr;
 
-    // TODO: create nStreams streams (cudaStream_t / cudaStreamCreate).
-
-    // TODO: for each chunk, on stream (i % nStreams):
-    //         1. cudaMemcpyAsync the chunk H2D
-    //         2. launch map_kernel<<<grid, block, 0, stream>>> on the chunk
-    //         3. cudaMemcpyAsync the chunk D2H
-    //       Use pointer offsets (h_in + off, d_in + off, ...) and the chunk's
-    //       actual length (clamp the last chunk to n).
+    // TODO: chunk the array across the streams and overlap copies with compute:
+    //       per chunk, async-copy H2D, launch map_kernel, async-copy D2H, each on
+    //       that chunk's stream (cudaMemcpyAsync). Mind the smaller last chunk.
 
     // TODO: synchronize, then destroy the streams and free the device buffers.
+    //       (See README's function table and hints.md if stuck.)
 }

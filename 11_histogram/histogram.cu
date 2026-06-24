@@ -7,26 +7,21 @@
 // Each block keeps a private 256-bin histogram in shared memory, fills it with
 // cheap shared-memory atomics, then merges it into the global histogram once.
 __global__ void hist_privatized(const unsigned char* data, unsigned int* hist, int n) {
-    // A per-block private histogram in shared memory.
-    // TODO: declare __shared__ unsigned int sHist[NBINS];
+    // TODO: declare a per-block private NBINS histogram in shared memory.
 
-    // 1) Zero the shared histogram cooperatively (256 bins, blockDim.x threads).
-    // TODO: for (int b = threadIdx.x; b < NBINS; b += blockDim.x) sHist[b] = 0;
-
-    // TODO: __syncthreads();
+    // 1) Zero the shared histogram cooperatively, then barrier.
+    // TODO: cooperatively clear all bins, then __syncthreads().
 
     // 2) Grid-stride over the input; bump shared bins with shared-memory atomics.
     for (int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < n; i += blockDim.x * gridDim.x) {
         unsigned char v = data[i];
-        // TODO: atomicAdd(&sHist[v], 1u);
+        // TODO: atomically increment this value's shared bin.
     }
 
-    // TODO: __syncthreads();
-
-    // 3) Merge the private histogram into the global one (one atomic per bin).
-    // TODO: for (int b = threadIdx.x; b < NBINS; b += blockDim.x)
-    //           atomicAdd(&hist[b], sHist[b]);
+    // 3) Barrier, then merge the private histogram into the global one.
+    // TODO: __syncthreads(), then cooperatively atomicAdd each shared bin into
+    //       the global histogram. (See README + hints.md.)
 }
 
 // Host entry point. data is a DEVICE pointer of n bytes; hist is 256 DEVICE
@@ -35,5 +30,5 @@ void solve(const unsigned char* data, unsigned int* hist, int n) {
     int block = 256;
     // Enough blocks to keep the GPU busy; the grid-stride loop covers any n.
     int grid  = 1024;
-    // TODO: launch hist_privatized<<<grid, block>>>(data, hist, n);
+    // TODO: launch hist_privatized with this grid/block configuration.
 }

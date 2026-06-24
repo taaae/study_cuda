@@ -12,33 +12,28 @@
 // Predicate: keep elements strictly greater than a threshold.
 struct keep_above {
     float t;
-    // TODO: __host__ __device__ bool operator()(float x) const { return x > t; }
+    // TODO: add a __host__ __device__ operator() returning whether x > t.
 };
 
 // Unary op: square a value (used by transform_reduce).
 struct square {
-    // TODO: __host__ __device__ float operator()(float x) const { return x * x; }
+    // TODO: add a __host__ __device__ operator() returning x squared.
 };
 
 // All pointers are DEVICE pointers. out_count and out_sumsq are single values.
 void solve(const float* in, int n, float threshold,
            float* out_compacted, int* out_count, float* out_sumsq) {
-    // Wrap raw device pointers so Thrust can iterate over them.
-    // TODO: thrust::device_ptr<const float> in_ptr(in);
-    // TODO: thrust::device_ptr<float>       out_ptr(out_compacted);
+    // TODO: wrap the raw device pointers in thrust::device_ptr so Thrust can
+    //       iterate over them.
 
     // (a) Stream-compact elements > threshold into out_compacted.
-    // The returned iterator minus out_ptr is the number of kept elements.
-    // TODO: auto end = thrust::copy_if(thrust::device, in_ptr, in_ptr + n,
-    //                                  out_ptr, keep_above{threshold});
-    // TODO: int count = (int)(end - out_ptr);
+    // TODO: use thrust::copy_if with the keep_above predicate; the count is the
+    //       returned iterator minus the output begin.
 
-    // (b) Sum of squares of the KEPT elements (out_ptr .. out_ptr + count).
-    // TODO: float ss = thrust::transform_reduce(thrust::device,
-    //                       out_ptr, out_ptr + count,
-    //                       square{}, 0.0f, thrust::plus<float>());
+    // (b) Sum of squares of the KEPT elements only.
+    // TODO: use thrust::transform_reduce over the kept range with the square op
+    //       and plus to get the sum of squares.
 
-    // Write the two scalar results back to their single-value device outputs.
-    // TODO: CUDA_CHECK(cudaMemcpy(out_count, &count, sizeof(int),   cudaMemcpyHostToDevice));
-    // TODO: CUDA_CHECK(cudaMemcpy(out_sumsq, &ss,    sizeof(float), cudaMemcpyHostToDevice));
+    // TODO: copy the two scalar results back to their single-value device
+    //       outputs. (See README + hints.md.)
 }

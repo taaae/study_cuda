@@ -15,14 +15,12 @@ __global__ void spmv_vector(const int* rowPtr, const int* colIdx,
     int start = rowPtr[warpId];
     int end   = rowPtr[warpId + 1];
 
-    // TODO: strided loop — each lane handles k = start+lane, start+lane+32, ...
-    //       accumulating sum += vals[k] * x[colIdx[k]].
+    // TODO: have the 32 lanes stride across this row's nonzeros (start..end),
+    //       each accumulating its own partial of vals[k]*x[colIdx[k]].
     float sum = 0.0f;
 
-    // TODO: warp-reduce `sum` across all 32 lanes with __shfl_down_sync
-    //       (mask 0xffffffff, offsets 16,8,4,2,1).
-
-    // TODO: lane 0 writes y[warpId] = sum.
+    // TODO: reduce the lanes' partials to one value with __shfl_down_sync,
+    //       then have lane 0 write it to y[warpId]. (See README + hints.md.)
 }
 
 // Host entry point. All pointers are DEVICE pointers (CSR). Launch ONE WARP per
@@ -31,4 +29,5 @@ void solve(const int* rowPtr, const int* colIdx, const float* vals,
            const float* x, float* y, int nrows) {
     // TODO: choose a block size (multiple of 32) and a grid that gives nrows
     //       warps total, then launch spmv_vector.
+    //       (See README's function table and hints.md if stuck.)
 }

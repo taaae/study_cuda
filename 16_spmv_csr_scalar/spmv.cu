@@ -7,9 +7,9 @@ __global__ void spmv_scalar(const int* rowPtr, const int* colIdx,
                             const float* vals, const float* x, float* y, int nrows) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= nrows) return;
-    // TODO: read start = rowPtr[r] and end = rowPtr[r+1].
-    // TODO: loop k from start to end, accumulate sum += vals[k] * x[colIdx[k]].
-    // TODO: write y[r] = sum.
+    // TODO: this thread owns row r. Sum vals[k]*x[colIdx[k]] over the row's
+    //       nonzeros (the rowPtr[r]..rowPtr[r+1] range) and store it in y[r].
+    //       (See README + hints.md.)
 }
 
 // Host entry point. All pointers are DEVICE pointers (CSR layout). Launch one
@@ -17,4 +17,5 @@ __global__ void spmv_scalar(const int* rowPtr, const int* colIdx,
 void solve(const int* rowPtr, const int* colIdx, const float* vals,
            const float* x, float* y, int nrows) {
     // TODO: launch spmv_scalar with one thread per row.
+    //       (See README's function table and hints.md if stuck.)
 }

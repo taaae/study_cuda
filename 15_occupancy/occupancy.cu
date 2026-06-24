@@ -4,7 +4,8 @@
 
 // Memory-bound element-wise map: out[i] = in[i] * 2 + 1. Grid-stride.
 __global__ void map_kernel(const float* in, float* out, int n) {
-    // TODO: grid-stride loop computing out[i] = in[i] * 2.0f + 1.0f
+    // TODO: with a grid-stride loop, set out = in*2 + 1 for each element.
+    //       (See README + hints.md.)
 }
 
 // Host entry point. in / out are DEVICE pointers of length n.
@@ -13,12 +14,8 @@ void solve(const float* in, float* out, int n) {
     int minGridSize = 0;
     int blockSize   = 0;
 
-    // TODO: call cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
-    //       map_kernel, 0, 0) to pick a launch config for map_kernel.
-
-    // TODO: pick a grid. A grid-stride kernel covers all n with any grid; a
-    //       sensible choice is min(minGridSize, ceil_div(n, blockSize)) so you
-    //       never launch more blocks than there is work for.
-
-    // TODO: launch map_kernel<<<grid, blockSize>>>(in, out, n);
+    // TODO: let the occupancy API pick blockSize and minGridSize for map_kernel
+    //       (cudaOccupancyMaxPotentialBlockSize), then choose a grid that covers n
+    //       without launching more blocks than there is work for, and launch.
+    //       (See README's function table and hints.md if stuck.)
 }

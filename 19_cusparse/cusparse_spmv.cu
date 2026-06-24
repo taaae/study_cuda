@@ -21,21 +21,10 @@ void solve(const int* rowPtr, const int* colIdx, const float* vals,
            const float* x, float* y, int nrows, int ncols, int nnz) {
     float alpha = 1.0f, beta = 0.0f;   // plain y = A*x; passed BY POINTER below
 
-    // TODO: create the cuSPARSE handle (cusparseCreate).
-
-    // TODO: create the sparse-matrix descriptor for A with cusparseCreateCsr.
-    //       Indices are 32-bit (CUSPARSE_INDEX_32I), base 0
-    //       (CUSPARSE_INDEX_BASE_ZERO), values CUDA_R_32F.
-
-    // TODO: create dense-vector descriptors for x (length ncols) and y
-    //       (length nrows) with cusparseCreateDnVec, type CUDA_R_32F.
-
-    // TODO: query the required buffer size with cusparseSpMV_bufferSize using
-    //       CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha/&beta, CUDA_R_32F,
-    //       CUSPARSE_SPMV_ALG_DEFAULT. Then cudaMalloc the external buffer.
-
-    // TODO: run cusparseSpMV with the SAME args plus the buffer pointer.
-
-    // TODO: tear down — destroy the matrix/vector descriptors, free the buffer,
-    //       destroy the handle.
+    // Use the cuSPARSE generic API. The overall flow:
+    //   - create a handle, a CSR descriptor for A, and dense-vector descriptors
+    //     for x and y (32-bit indices, base 0, CUDA_R_32F);
+    //   - query the SpMV buffer size, allocate that scratch buffer, run the SpMV
+    //     (non-transpose, ALG_DEFAULT), then tear everything down.
+    // TODO: implement the steps above. (See README's function table + hints.md.)
 }

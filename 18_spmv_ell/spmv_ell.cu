@@ -10,17 +10,15 @@
 //
 __global__ void spmv_ell(const int* ell_cols, const float* ell_vals,
                          const float* x, float* y, int nrows, int maxnnz) {
-    // TODO: compute this thread's global row index and guard against nrows.
-    // TODO: loop k = 0 .. maxnnz-1, reading ell_cols[k*nrows + row] and
-    //       ell_vals[k*nrows + row] (the column-major stride is k*nrows), and
-    //       accumulate sum += val * x[col].
-    // TODO: write y[row] = sum.
+    // TODO: one thread per row (guard against nrows). Walk this row's maxnnz
+    //       slots through the column-major ELL layout, accumulating value*x[col],
+    //       and store the result into y. (See README + hints.md.)
 }
 
 // Host entry point. All pointers are DEVICE pointers.
 // ell_cols / ell_vals have length maxnnz*nrows (column-major). y has length nrows.
 void solve(const int* ell_cols, const float* ell_vals,
            const float* x, float* y, int nrows, int maxnnz) {
-    // TODO: pick a block size, compute grid = ceil_div(nrows, block),
-    //       and launch spmv_ell<<<grid, block>>>(...).
+    // TODO: choose a launch config covering all nrows and launch spmv_ell.
+    //       (See README + hints.md.)
 }
