@@ -11,7 +11,7 @@ __global__ void saxpy(float a, const float* x, float* y, int n) {
     int grid_stride = gridDim.x * blockDim.x;
     // TODO: loop i from start to n in steps of stride, doing y[i] = a*x[i] + y[i].
     for (int i = start_idx; i < n; i += grid_stride) {
-        y[i] = fmaf(a * x[i] + y[i]);
+        y[i] = fmaf(a, x[i], y[i]);
     }
 }
 
