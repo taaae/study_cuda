@@ -14,6 +14,23 @@ __global__ void transpose(const float* in, float* out, int n) {
     // TODO: do a coalesced store to the transposed block in `out`, reading the tile
     //       with swapped indices. Guard both stages against the matrix bounds.
     // (See README's function table and hints.md if stuck.)
+    ___shared___ float tile[TILE][TILE + 1];
+    int in_i = blockIdx.x * TILE + threadIdx.x;
+    int in_j = blockIdx.y * TILE + threadIdx.y;
+
+
+    if (in_i < n && locl_j < n) {
+        tile[threadIdx.y][threadIdx.x] = in[in_j * n + in_i];
+    }
+
+    __syncthreads();
+
+    int out_i = blockIdx.y * TILE + threadIdx.x;
+    int out_j = blockIdx.x * TILE + threadIdx.y;
+
+    if (out_i < n && out_j < n) {
+        out[out_j * n + out_i] = tile[threadIdx.x][threadIdx.y]; // tile is already transposed, so it's indexed the same way as out
+    }
 }
 
 // Host entry point. in, out are DEVICE pointers to n*n floats, row-major.
