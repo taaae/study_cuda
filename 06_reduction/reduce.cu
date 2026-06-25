@@ -29,7 +29,7 @@ __global__ void reduce(const float* in, float* out, int n) {
     }
     
     // copy required elements into shared memory first
-    partial_sum[thred_i] = thread_sum;
+    partial_sum[thread_i] = thread_sum;
 
     __syncthreads();
 
@@ -59,7 +59,7 @@ void solve(const float* in, float* out, int n) {
     // TODO: choose block = BLOCK and a capped grid size (the grid-stride loop
     //       handles any leftover), then launch reduce. (See README + hints.md.)
     cudaDeviceProp p;
-    cudeGetDeviceProperties(&p);
+    cudaGetDeviceProperties(&p);
     int sms = p.multiProcessorCount;
     reduce<<<sms * 32, BLOCK>>>(in, out, n);
 }
