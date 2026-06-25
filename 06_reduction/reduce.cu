@@ -64,5 +64,5 @@ void solve(const float* in, float* out, int n) {
         cudaGetDeviceProperties(&p, 0);
         blocks = p.multiProcessorCount * 32;
     }
-    reduce<<<sms * 32, BLOCK>>>(in, out, n);
+    reduce<<<blocks, BLOCK>>>(in, out, n);
 }
