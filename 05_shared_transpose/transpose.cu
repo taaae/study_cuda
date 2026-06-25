@@ -14,12 +14,12 @@ __global__ void transpose(const float* in, float* out, int n) {
     // TODO: do a coalesced store to the transposed block in `out`, reading the tile
     //       with swapped indices. Guard both stages against the matrix bounds.
     // (See README's function table and hints.md if stuck.)
-    ___shared___ float tile[TILE][TILE + 1];
+    __shared__ float tile[TILE][TILE + 1];
     int in_i = blockIdx.x * TILE + threadIdx.x;
     int in_j = blockIdx.y * TILE + threadIdx.y;
 
 
-    if (in_i < n && locl_j < n) {
+    if (in_i < n && in_j < n) {
         tile[threadIdx.y][threadIdx.x] = in[in_j * n + in_i];
     }
 
