@@ -58,8 +58,11 @@ __global__ void reduce(const float* in, float* out, int n) {
 void solve(const float* in, float* out, int n) {
     // TODO: choose block = BLOCK and a capped grid size (the grid-stride loop
     //       handles any leftover), then launch reduce. (See README + hints.md.)
-    cudaDeviceProp p;
-    cudaGetDeviceProperties(&p, 0);
-    int sms = p.multiProcessorCount;
+    static int blocks = 0;
+    if (blocks == 0) {                       // computed once, reused forever
+        cudaDeviceProp p;
+        cudaGetDeviceProperties(&p, 0);
+        blocks = p.multiProcessorCount * 32;
+    }
     reduce<<<sms * 32, BLOCK>>>(in, out, n);
 }
