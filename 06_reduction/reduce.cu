@@ -32,7 +32,7 @@ __global__ void reduce(const float* in, float* out, int n) {
     // do recursive partial summation, first each 2, then each 4 etc
     for (int el_to_sum = 2; el_to_sum <= BLOCK; el_to_sum *= 2) {
         if (thread_i % el_to_sum == 0) {
-            local_i[thread_i] += local_i[thread_i + el_to_sum / 2];
+            partial_sums[thread_i] += partial_sums[thread_i + el_to_sum / 2];
         }
         __syncthreads();
     }
