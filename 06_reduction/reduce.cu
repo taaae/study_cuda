@@ -19,6 +19,7 @@ __global__ void reduce(const float* in, float* out, int n) {
 
     int local_i = blockIdx.x * blockDim.x + threadIdx.x;
     int thread_i = threadIdx.x;
+    int blockDim = blockDim.x;
     
     // copy required elements into shared memory first
     if (local_i < n) {
@@ -30,9 +31,16 @@ __global__ void reduce(const float* in, float* out, int n) {
     __syncthreads();
 
     // do recursive partial summation, first each 2, then each 4 etc
-    for (int el_to_sum = 2; el_to_sum <= BLOCK; el_to_sum *= 2) {
-        if (thread_i % el_to_sum == 0) {
-            partial_sums[thread_i] += partial_sums[thread_i + el_to_sum / 2];
+    // for (int el_to_sum = 2; el_to_sum <= BLOCK; el_to_sum *= 2) {
+    //    if (thread_i % el_to_sum == 0) {
+    //        partial_sums[thread_i] += partial_sums[thread_i + el_to_sum / 2];
+    //    }
+    //    __syncthreads();
+    // }
+    // more optimized version: stride is not 1,2,4, but blockDim/2, /4.. instead
+    for (int s =  blockDim / 2; s > 0; s /= 2) {
+        if (thread_i < s) {
+            partial_sums[thread_i] += partial_sums[thread_i + s];
         }
         __syncthreads();
     }
