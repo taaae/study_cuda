@@ -95,12 +95,48 @@ class Grader:
             if m:
                 correct = m.group(1) == "1"
         metrics["_correct"] = correct
+        self._print_measured(metrics)
         if not self.keep:
             try:
                 os.remove(self.binary)
             except OSError:
                 pass
         return metrics
+
+    # Friendly one-line annotations for known metric names.
+    _NOTES = {
+        "ms": "kernel time (best of N runs)",
+        "student_ms": "your measured kernel time",
+        "harness_ms": "harness-measured kernel time",
+        "naive_ms": "naive-baseline kernel time",
+        "base_ms": "baseline kernel time",
+        "baseline_ms": "baseline kernel time",
+        "ms_naive": "naive-baseline kernel time",
+        "ms_csr_baseline": "scalar-CSR baseline time",
+        "cublas_ms": "cuBLAS reference time",
+        "gbps": "achieved bandwidth (GB/s)",
+        "gflops": "achieved throughput (GFLOP/s)",
+        "gflops_cublas": "cuBLAS throughput (GFLOP/s)",
+        "bw_frac": "fraction of peak bandwidth",
+        "frac_cublas": "fraction of cuBLAS throughput",
+        "speedup": "speedup vs baseline",
+        "speedup_vs_naive": "speedup vs naive baseline",
+        "rel_resid": "final relative residual",
+        "rel_err": "relative error",
+        "max_abs_err": "max absolute error",
+        "max_rel_err": "max relative error",
+    }
+
+    def _print_measured(self, metrics):
+        keys = [k for k in metrics if not k.startswith("_")]
+        if not keys:
+            return
+        print(f"{DIM}# measured:{RESET}")
+        width = max(len(k) for k in keys)
+        for k in keys:
+            note = self._NOTES.get(k, "")
+            print(f"  {k:<{width}} = {metrics[k]:<12.6g} "
+                  f"{DIM}{note}{RESET}")
 
     # -- checks --------------------------------------------------------------
     def require_correct(self, metrics):

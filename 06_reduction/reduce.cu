@@ -17,15 +17,19 @@ __global__ void reduce(const float* in, float* out, int n) {
     //       (See README's optimization ladder + hints.md.)
     __shared__ float partial_sums[BLOCK];
 
+    int stride = blockDim.x * gridDim.x;
+
     int local_i = blockIdx.x * blockDim.x + threadIdx.x;
     int thread_i = threadIdx.x;
+
+    float thread_sum = 0.0f;
+
+    for (int i = local_i; i < n; i += stride) {
+        thread_sum += in[i];
+    }
     
     // copy required elements into shared memory first
-    if (local_i < n) {
-        partial_sums[thread_i] = in[local_i];
-    } else {
-        partial_sums[thread_i] = 0;
-    }
+    partial_sum[thred_i] = thread_sum;
 
     __syncthreads();
 
@@ -54,8 +58,8 @@ __global__ void reduce(const float* in, float* out, int n) {
 void solve(const float* in, float* out, int n) {
     // TODO: choose block = BLOCK and a capped grid size (the grid-stride loop
     //       handles any leftover), then launch reduce. (See README + hints.md.)
-    // cudaDeviceProp p;
-    // cudeGetDeviceProperties(&p);
-    // int sms = p.multiProcessorCount;
-    reduce<<<ceil_div(n, BLOCK), BLOCK>>>(in, out, n);
+    cudaDeviceProp p;
+    cudeGetDeviceProperties(&p);
+    int sms = p.multiProcessorCount;
+    reduce<<<sms * 32, BLOCK>>>(in, out, n);
 }
