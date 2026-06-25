@@ -19,7 +19,6 @@ __global__ void reduce(const float* in, float* out, int n) {
 
     int local_i = blockIdx.x * blockDim.x + threadIdx.x;
     int thread_i = threadIdx.x;
-    int blockDim = blockDim.x;
     
     // copy required elements into shared memory first
     if (local_i < n) {
@@ -38,7 +37,7 @@ __global__ void reduce(const float* in, float* out, int n) {
     //    __syncthreads();
     // }
     // more optimized version: stride is not 1,2,4, but blockDim/2, /4.. instead
-    for (int s =  blockDim / 2; s > 0; s /= 2) {
+    for (int s =  blockDim.x / 2; s > 0; s /= 2) {
         if (thread_i < s) {
             partial_sums[thread_i] += partial_sums[thread_i + s];
         }
