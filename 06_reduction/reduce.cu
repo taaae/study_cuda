@@ -15,15 +15,30 @@ __global__ void reduce(const float* in, float* out, int n) {
     //       then reduce the block's values in shared memory (sequential-addressing
     //       tree) and have thread 0 atomicAdd the block result into *out.
     //       (See README's optimization ladder + hints.md.)
+    __shared__ partial_sums[BLOCK];
+
     int local_i = blockIdx.x * blockDim.x + threadIdx.x;
+    int thread_i = threadIdx.x;
+    
+    // copy required elements into shared memory first
+    if (local_i < n) {
+        partial_sums[thread_i] = in[local_i];
+    } else {
+        partial_sums[thread_i] = 0;
+    }
 
-    if (local_i == 0) {
-        int sum = 0;
-        for (int i = 0; i < n; i++) {
-            sum += in[i];
+    __syncthreads();
+
+    // do recursive partial summation, first each 2, then each 4 etc
+    for (int el_to_sum = 2; el_to_sum <= BLOCK; el_to_sum *= 2) {
+        if (thread_i % el_to_sum == 0) {
+            local_i[thread_i] += local_i[thread_i + el_to_sum / 2];
         }
-
-        out[0] = sum;
+        __syncthreads();
+    }
+    // at the end partial, race free add all the partial sums into global out
+    if (thread_i == 0) {
+        atomicAdd(out, partial_sums[0]);
     }
 }
 
