@@ -15,6 +15,16 @@ __global__ void reduce(const float* in, float* out, int n) {
     //       then reduce the block's values in shared memory (sequential-addressing
     //       tree) and have thread 0 atomicAdd the block result into *out.
     //       (See README's optimization ladder + hints.md.)
+    int local_i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (local_i == 0) {
+        int sum = 0;
+        for (int i = 0; i < n; i++) {
+            sum += in[i];
+        }
+
+        out[0] = sum;
+    }
 }
 
 // Host entry point. in and out are DEVICE pointers; *out is already zeroed.
@@ -22,4 +32,8 @@ __global__ void reduce(const float* in, float* out, int n) {
 void solve(const float* in, float* out, int n) {
     // TODO: choose block = BLOCK and a capped grid size (the grid-stride loop
     //       handles any leftover), then launch reduce. (See README + hints.md.)
+    // cudaDeviceProp p;
+    // cudeGetDeviceProperties(&p);
+    // int sms = p.multiProcessorCount;
+    reduce<<<ceil_div(n, BLOCK), BLOCK>>>(in, out, n);
 }
