@@ -24,7 +24,7 @@ __global__ void gemm(const float* A, const float* B, float* C,
     __shared__ float A_shared[TILE * TILE];
     __shared__ float B_shared[TILE * TILE];
 
-    int local_a_col = start_k + threadIdx.x // since row-major, we want to allign x with columns
+    int local_a_col = start_k + threadIdx.x; // since row-major, we want to allign x with columns
     int local_a_row = start_m + threadIdx.y; 
     int local_b_col = start_n + threadIdx.x;
     int local_b_row = start_k + threadIdx.y;
@@ -35,7 +35,7 @@ __global__ void gemm(const float* A, const float* B, float* C,
     } else {
         A_shared[threadIdx.y * TILE + threadIdx.x] = 0;
     }
-    if (local_b_row < K && lcoal_b_col < N) {
+    if (local_b_row < K && local_b_col < N) {
         B_shared[threadIdx.y * TILE + threadIdx.x] = B[local_b_row * N + local_b_col];
     } else {
         B_shared[threadIdx.y * TILE + threadIdx.x] = 0;
@@ -63,6 +63,6 @@ void solve(const float* A, const float* B, float* C, int M, int N, int K) {
     // TODO: configure a TILE x TILE block and a grid covering all of C, then
     //       launch gemm. (See README + hints.md.)
     dim3 grid(ceil_div(M, TILE), ceil_div(K, TILE), ceil_div(N, TILE));
-    dim2 block(TILE, TILE);
+    dim3 block(TILE, TILE);
     gemm<<<grid, block>>>(A, B, C, M, N, K);
 }
