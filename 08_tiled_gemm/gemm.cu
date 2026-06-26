@@ -8,7 +8,7 @@
 #define TILE 16
 #endif
 
-__global__ void zeromat(const float* C, int M, int N) {
+__global__ void zeromat(float* C, int M, int N) {
     int c_row = blockIdx.x * TILE + threadIdx.y;
     int c_col = blockIdx.y * TILE + threadIdx.x;
     C[c_row * N + c_col] = 0;
