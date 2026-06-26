@@ -11,7 +11,9 @@
 __global__ void zeromat(float* C, int M, int N) {
     int c_row = blockIdx.x * TILE + threadIdx.y;
     int c_col = blockIdx.y * TILE + threadIdx.x;
-    C[c_row * N + c_col] = 0;
+    if (c_row < M && c_col < N) {
+        C[c_row * N + c_col] = 0;
+    }
 }
 
 // C = A * B, all row-major. A is M x K, B is K x N, C is M x N.
