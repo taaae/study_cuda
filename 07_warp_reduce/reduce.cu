@@ -1,68 +1,77 @@
-// Exercise 06 — Parallel Reduction
+// Exercise 07 — Warp-Level Reduction
 // Fill in the TODOs. Do NOT add a main(); harness.cu provides it and calls solve().
 #include "cuda_utils.cuh"
 
-// Block size used by both the kernel's shared array and the launch in solve().
-// Keep these in sync.
 #ifndef BLOCK
 #define BLOCK 256
 #endif
 
-// Each block sums a chunk of `in` into a single block-level partial, then
-// contributes it to the global total at *out.
-__global__ void reduce(const float* in, float* out, int n) {
-    // TODO: accumulate this thread's slice of `in` with a grid-stride loop,
-    //       then reduce the block's values in shared memory (sequential-addressing
-    //       tree) and have thread 0 atomicAdd the block result into *out.
-    //       (See README's optimization ladder + hints.md.)
-    __shared__ float partial_sums[BLOCK];
 
-    int stride = blockDim.x * gridDim.x;
-
-    int local_i = blockIdx.x * blockDim.x + threadIdx.x;
-    int thread_i = threadIdx.x;
-
-    float thread_sum = 0.0f;
-
-    for (int i = local_i; i < n; i += stride) {
-        thread_sum += in[i];
+// Reduce one float per lane down to lane 0 of the warp using __shfl_down_sync.
+// Lane 0 returns the sum of all 32 lanes' values.
+__device__ float warpReduceSum(float v) {
+    // TODO: reduce `v` across the warp's 32 lanes with __shfl_down_sync (halving
+    //       the offset each step) so lane 0 ends up with the total, then return v.
+    //       (See README + hints.md.)
+    for (int s = 16; s >= 1; s >>= 1) {
+        v += __shfl_down_sync(0xffffffff, v, s);
     }
-    
-    // copy required elements into shared memory first
-    partial_sums[thread_i] = thread_sum;
+    return v;
+}
+
+// Each block: grid-stride load into a register, reduce within each warp via
+// warpReduceSum, combine the per-warp partials (store warp results to a small
+// __shared__ array, then warp-reduce the first warp), and atomicAdd the block
+// total to *out.
+__global__ void reduce(const float* in, float* out, int n) {
+    // TODO: grid-stride accumulate this thread's slice into a register, then
+    //       warpReduceSum within each warp. Stash the per-warp partials in a small
+    //       shared array, and have the first warp warpReduceSum those into the block
+    //       total. Thread 0 atomicAdds the block total into *out.
+    //       (See README + hints.md.)
+    float v = 0;
+    int absolute_i = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = absolute_i; i < n; i += stride) {
+        v += in[i];
+    }
+
+    int num_warps = blockDim.x >> 5;
+    __shared__ float warp_sums[BLOCK / 32];
+
+    v = warpReduceSum(v);
+
+
+    int warp = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+
+    if (lane == 0) {
+        warp_sums[warp] = v;
+    }
 
     __syncthreads();
 
-    // do recursive partial summation, first each 2, then each 4 etc
-    // for (int el_to_sum = 2; el_to_sum <= BLOCK; el_to_sum *= 2) {
-    //    if (thread_i % el_to_sum == 0) {
-    //        partial_sums[thread_i] += partial_sums[thread_i + el_to_sum / 2];
-    //    }
-    //    __syncthreads();
-    // }
-    // more optimized version: stride is not 1,2,4, but blockDim/2, /4.. instead
-    for (int s =  blockDim.x / 2; s > 0; s /= 2) {
-        if (thread_i < s) {
-            partial_sums[thread_i] += partial_sums[thread_i + s];
+    if (warp == 0) {
+        float w = 0;
+        if (lane < num_warps) {
+            w = warp_sums[lane];
         }
-       __syncthreads();
-    }
-    // at the end partial, race free add all the partial sums into global out
-    if (thread_i == 0) {
-        atomicAdd(out, partial_sums[0]);
+        w = warpReduceSum(w);
+        if (lane == 0) {
+            atomicAdd(out, w);
+        }
     }
 }
 
 // Host entry point. in and out are DEVICE pointers; *out is already zeroed.
-// Pick a launch configuration and launch reduce.
 void solve(const float* in, float* out, int n) {
-    // TODO: choose block = BLOCK and a capped grid size (the grid-stride loop
-    //       handles any leftover), then launch reduce. (See README + hints.md.)
-    static int blocks = 0;
-    if (blocks == 0) {                       // computed once, reused forever
+    // TODO: choose block = BLOCK and a capped grid, then launch reduce.
+    //       (See README + hints.md.)
+    static int grid = 0;
+    if (grid == 0) {
         cudaDeviceProp p;
         cudaGetDeviceProperties(&p, 0);
-        blocks = p.multiProcessorCount * 32;
+        grid = p.multiProcessorCount * 32;
     }
-    reduce<<<blocks, BLOCK>>>(in, out, n);
+    reduce<<<grid, BLOCK>>>(in, out, n);
 }
