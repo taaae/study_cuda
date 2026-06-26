@@ -35,6 +35,18 @@ __global__ void gemm(const float* A, const float* B, float* C,
     int local_b_col = start_n + threadIdx.x;
     int local_b_row = start_k + threadIdx.y;
 
+    // copy the whole tile to shared memory (2 values each thread) & sync
+    if (local_a_row < M && local_a_col < K) {
+        A_shared[threadIdx.y * TILE + threadIdx.x] = A[local_a_row * K + local_a_col];
+    } else {
+        A_shared[threadIdx.y * TILE + threadIdx.x] = 0;
+    }
+    if (local_b_row < K && local_b_col < N) {
+        B_shared[threadIdx.y * TILE + threadIdx.x] = B[local_b_row * N + local_b_col];
+    } else {
+        B_shared[threadIdx.y * TILE + threadIdx.x] = 0;
+    }
+    __syncthreads();
 
     float sum = 0; // accumulate here sum for one tile in C for each thread
 
