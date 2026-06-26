@@ -35,7 +35,6 @@ __global__ void gemm(const float* A, const float* B, float* C,
     int local_b_col = start_n + threadIdx.x;
     int local_b_row = start_k + threadIdx.y;
 
-    i
 
     float sum = 0; // accumulate here sum for one tile in C for each thread
 
