@@ -29,7 +29,7 @@ __global__ void reduce(const float* in, float* out, int n) {
     //       shared array, and have the first warp warpReduceSum those into the block
     //       total. Thread 0 atomicAdds the block total into *out.
     //       (See README + hints.md.)
-    int v = 0;
+    float v = 0;
     int absolute_i = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
     for (int i = absolute_i; i < n; i += stride) {
@@ -52,7 +52,7 @@ __global__ void reduce(const float* in, float* out, int n) {
     __syncthreads();
 
     if (warp == 0) {
-        int w = 0;
+        float w = 0;
         if (lane < num_warps) {
             w = warp_sums[lane];
         }
