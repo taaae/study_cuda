@@ -73,7 +73,7 @@ void solve(const float* A, const float* B, float* C, int M, int N, int K) {
     dim3 block(TILE, TILE);
     
     dim3 grid_c(ceil_div(M, TILE), ceil_div(N, TILE));
-    zeromat<<<grid_c, block>>>(C, M, N);
+    // zeromat<<<grid_c, block>>>(C, M, N);
 
     dim3 grid(ceil_div(M, TILE), ceil_div(K, TILE), ceil_div(N, TILE));
     gemm<<<grid, block>>>(A, B, C, M, N, K);
