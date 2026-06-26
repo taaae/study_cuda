@@ -37,7 +37,7 @@ __global__ void reduce(const float* in, float* out, int n) {
     }
 
     int num_warps = blockDim.x >> 5;
-    __shared__ warp_sums[num_warps];
+    __shared__ float warp_sums[BLOCK / 32];
 
     v = warpReduceSum(v);
 
